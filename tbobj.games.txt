@@ -1,0 +1,20 @@
+"Games" {
+	"tf" {
+		"Signatures" {
+			// one of two methods with: "robo_sapper", starts with member lookup, first non-virtual call returns ~vtable fun 30
+			"StartBuilding" {
+				"library"	"server"
+				"linux"	"@_ZN16CTFWeaponBuilder13StartBuildingEv"
+				"windows" "\x55\x8B\xEC\x51\x8B\xD1\x53\x89"
+				//LKASM 55 8b ec 51 8b d1 53 89 55 fc
+				//MASK  ff ff ff ff ff ff ff ff 00 00
+			}
+		}
+		//"Offsets" {
+		//	"IsPlacementPosValid" {
+		//		"linux" "335"
+		//		"windows" "334"
+		//	}
+		//}
+	}
+}

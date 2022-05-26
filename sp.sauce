@@ -1,0 +1,9 @@
+sourcemod 1.10
+
+auth github ${GITHUB_TOKEN}
+
+dependency github nosoop/SM-TFUtils latest
+dependency github bcserv/smlib transitional_syntax-SNAPSHOT
+dependency limetech vphysics latest
+
+spcomp -O2 tossbuildings.sp
