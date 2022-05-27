@@ -10,11 +10,11 @@
 #pragma newdecls required
 #pragma semicolon 1
 
-#define PLUGIN_VERSION "22w21a"
+#define PLUGIN_VERSION "22w21b"
 
 public Plugin myinfo = {
 	name = "[TF2] Toss Buildings",
-	description = "Use /toss to throw picked up buildings",
+	description = "Use your reload button to toss carried buildings",
 	author = "reBane, zen",
 	version = PLUGIN_VERSION,
 	url = "N/A",
@@ -61,12 +61,21 @@ public void OnPluginStart() {
 	
 	delete data;
 	
+	ConVar cvar = CreateConVar("sm_toss_building_version", PLUGIN_VERSION, "", FCVAR_NOTIFY|FCVAR_DONTRECORD);
+	cvar.AddChangeHook(LockConVar);
+	cvar.SetString(PLUGIN_VERSION);
+	delete cvar;
+	
 	HookEvent("player_carryobject", OnPlayerCarryObject);
 	HookEvent("player_builtobject", OnPlayerBuiltObject);
 	HookEvent("player_dropobject", OnPlayerBuiltObject);
 	
 	g_aAirbornObjects = new ArrayList(3); //phys parent, object, thrown angle (yaw)
 }
+public void LockConVar(ConVar convar, const char[] oldValue, const char[] newValue) {
+	if (!StrEqual(newValue, PLUGIN_VERSION)) convar.SetString(PLUGIN_VERSION);
+}
+
 
 public void OnMapStart() {
 	g_aAirbornObjects.Clear();
@@ -220,7 +229,7 @@ void ValidateThrown() {
 		Entity_GetAbsOrigin(phys, pos);
 		vec = pos;
 		vec[2] -= 16.0;
-		pos[2] += 48.0;
+		pos[2] += 8.0;
 		Handle trace = TR_TraceRayFilterEx(pos, vec, MASK_SOLID, RayType_EndPoint, TEF_HitThrownFilter, i);
 		if (!TR_DidHit(trace)) {
 			delete trace;
@@ -289,12 +298,47 @@ bool StartBuilding(int client) {
 	int type = GetEntProp(weapon, Prop_Send, "m_iObjectType");
 	if (!(BUILDING_DISPENSER <= type <= BUILDING_SENTRYGUN))
 		return false; //supported buildings
-	//trying to fix a crash related to dereferencing a 0 owner?
+	int bstate = GetEntProp(weapon, Prop_Send, "m_iBuildState");
+	if (bstate != BS_PLACING && bstate != BS_PLACING_INVALID)
+		return false; //currently not placing
+	int objectToBuild = GetEntPropEnt(weapon, Prop_Send, "m_hObjectBeingBuilt");
+	if (objectToBuild == INVALID_ENT_REFERENCE) {
+		RequestFrame(FixNoObjectBeingHeld, GetClientUserId(client));
+		return false; //no object being buil!?
+	}
 	SetEntPropEnt(weapon, Prop_Send, "m_hOwner", client);
-	SetEntProp(weapon, Prop_Send, "m_iBuildState", BS_PLACING);
+	SetEntProp(weapon, Prop_Send, "m_iBuildState", BS_PLACING); //if placing_invalid
 	SDKCall(sdk_fnStartBuilding, weapon);
 	return true;
 }
+
+void FixNoObjectBeingHeld(int user) {
+	//go through all validation again
+	int client = GetClientOfUserId(user);
+	if (!client || !IsClientInGame(client) || !IsPlayerAlive(client))
+		return;
+	int weapon = Client_GetActiveWeapon(client);
+	int item = IsValidEdict(weapon) ? GetEntProp(weapon, Prop_Send, "m_iItemDefinitionIndex") : -1;
+	if (item != 28)
+		return; //weapon switched
+	int type = GetEntProp(weapon, Prop_Send, "m_iObjectType");
+	if (!(BUILDING_DISPENSER <= type <= BUILDING_SENTRYGUN))
+		return; //unsupported building
+	int bstate = GetEntProp(weapon, Prop_Send, "m_iBuildState");
+	if (bstate != BS_PLACING && bstate != BS_PLACING_INVALID)
+		return; //not in a glitched state
+	int objectToBuild = GetEntPropEnt(weapon, Prop_Send, "m_hObjectBeingBuilt");
+	if (objectToBuild == INVALID_ENT_REFERENCE) {
+		//holding empty box, try to find another weapon to switch to
+		for (int i=2;i>=0;i-=1) {
+			weapon = Client_GetWeaponBySlot(client, i);
+			if (weapon != INVALID_ENT_REFERENCE) {
+				Client_SetActiveWeapon(client, weapon);
+			}
+		}
+	}
+}
+
 //crashes, idk why
 //bool IsPlacementPosValid(int building) {
 //	char classname[64];
