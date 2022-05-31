@@ -10,7 +10,7 @@
 #pragma newdecls required
 #pragma semicolon 1
 
-#define PLUGIN_VERSION "22w21b"
+#define PLUGIN_VERSION "22w22a"
 
 public Plugin myinfo = {
 	name = "[TF2] Toss Buildings",
@@ -43,6 +43,8 @@ float g_flClientLastBeep[MAXPLAYERS+1];
 #define TBLOCK_WFP (1<<0)
 int g_iBlockFlags;
 
+GlobalForward g_fwdToss, g_fwdTossPost, g_fwdLanded;
+
 public void OnPluginStart() {
 	GameData data = new GameData("tbobj.games");
 	if (data == null)
@@ -71,6 +73,11 @@ public void OnPluginStart() {
 	HookEvent("player_dropobject", OnPlayerBuiltObject);
 	
 	g_aAirbornObjects = new ArrayList(3); //phys parent, object, thrown angle (yaw)
+	
+	//let other plugins integrate :)
+	g_fwdToss = CreateGlobalForward("TF2_OnTossBuilding", ET_Event, Param_Cell, Param_Cell, Param_Cell);
+	g_fwdTossPost = CreateGlobalForward("TF2_OnTossBuildingPost", ET_Ignore, Param_Cell, Param_Cell, Param_Cell);
+	g_fwdLanded = CreateGlobalForward("TF2_OnBuildingLanded", ET_Ignore, Param_Cell, Param_Cell);
 }
 public void LockConVar(ConVar convar, const char[] oldValue, const char[] newValue) {
 	if (!StrEqual(newValue, PLUGIN_VERSION)) convar.SetString(PLUGIN_VERSION);
@@ -136,6 +143,18 @@ public void ThrowBuilding(any buildref) {
 	if (building == INVALID_ENT_REFERENCE) return;
 	int owner = GetEntPropEnt(building, Prop_Send, "m_hBuilder");
 	if (owner < 1 || owner > MaxClients || !IsClientInGame(owner)) return;
+	int type = GetEntProp(building, Prop_Send, "m_iObjectType");
+	
+	if (g_fwdToss.FunctionCount>0) {
+		Action result;
+		Call_StartForward(g_fwdToss);
+		Call_PushCell(building);
+		Call_PushCell(type);
+		Call_PushCell(owner);
+		if (Call_Finish(result) != SP_ERROR_NONE || result != Plugin_Continue) {
+			return;
+		}
+	}
 	
 	float eyes[3];
 	float origin[3];
@@ -162,7 +181,7 @@ public void ThrowBuilding(any buildref) {
 	if (phys == INVALID_ENT_REFERENCE) return;
 	
 	char buffer[PLATFORM_MAX_PATH];
-	switch (GetEntProp(building, Prop_Send, "m_iObjectType")) {
+	switch (type) {
 		case BUILDING_SENTRYGUN: DispatchKeyValue(phys, "model", "models/buildables/sentry1.mdl");
 		case BUILDING_DISPENSER: DispatchKeyValue(phys, "model", "models/buildables/dispenser_light.mdl");
 		case BUILDING_TELEPORTER: DispatchKeyValue(phys, "model", "models/buildables/teleporter_light.mdl");
@@ -196,6 +215,14 @@ public void ThrowBuilding(any buildref) {
 	onade[1]=EntIndexToEntRef(building);
 	onade[2]=angles[1];
 	g_aAirbornObjects.PushArray(onade);
+	
+	if (g_fwdTossPost.FunctionCount>0) {
+		Call_StartForward(g_fwdToss);
+		Call_PushCell(building);
+		Call_PushCell(type);
+		Call_PushCell(owner);
+		Call_Finish();
+	}
 }
 
 public bool TEF_HitThrownFilter(int entity, int contentsMask, any data) {
@@ -366,11 +393,17 @@ public Action ValidateBuilding(Handle timer, any building) {
 	SubtractVectors(maxs,four,maxs);
 	
 	Handle trace = TR_TraceHullFilterEx(origin, origin, mins, maxs, MASK_SOLID, TEF_HitSelfFilter, obj);
-	bool hit = TR_DidHit(trace);
+	bool invalid = TR_DidHit(trace) || TF2Util_IsPointInRespawnRoom(origin, obj);
 	delete trace;
-	if (hit || TF2Util_IsPointInRespawnRoom(origin, obj)) {
+	if (invalid) {
 		SetVariantInt(1000);
 		AcceptEntityInput(obj, "RemoveHealth");
+	}
+	if (g_fwdLanded.FunctionCount>0) {
+		Call_StartForward(g_fwdLanded);
+		Call_PushCell(building);
+		Call_PushCell(!invalid);
+		Call_Finish();
 	}
 	return Plugin_Stop;
 }
