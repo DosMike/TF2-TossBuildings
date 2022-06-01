@@ -7,6 +7,8 @@
 #include <vphysics>
 #include <tf2utils>
 
+#tryinclude <tf2hudmsg>
+
 #pragma newdecls required
 #pragma semicolon 1
 
@@ -39,11 +41,19 @@ Handle sdk_fnStartBuilding;
 //Handle sdk_fnIsPlacementPosValid;
 ArrayList g_aAirbornObjects;
 float g_flClientLastBeep[MAXPLAYERS+1];
+float g_flClientLastNotif[MAXPLAYERS+1]; //for hud notifs, as those make noise
 
 #define TBLOCK_WFP (1<<0)
 int g_iBlockFlags;
+#define TBFLAG_DISPENSER (1<<BUILDING_DISPENSER)
+#define TBFLAG_TELEPORTER (1<<BUILDING_TELEPORTER)
+#define TBFLAG_SENTRYGUN (1<<BUILDING_SENTRYGUN)
+int g_iBlockTypes;
+float g_flThrowForce;
 
 GlobalForward g_fwdToss, g_fwdTossPost, g_fwdLanded;
+
+bool g_bDepHudMsg; //for fancy messages
 
 public void OnPluginStart() {
 	GameData data = new GameData("tbobj.games");
@@ -63,10 +73,23 @@ public void OnPluginStart() {
 	
 	delete data;
 	
-	ConVar cvar = CreateConVar("sm_toss_building_version", PLUGIN_VERSION, "", FCVAR_NOTIFY|FCVAR_DONTRECORD);
-	cvar.AddChangeHook(LockConVar);
-	cvar.SetString(PLUGIN_VERSION);
-	delete cvar;
+	ConVar cvarTypes = CreateConVar("sm_toss_building_types", "dispenser teleporter sentrygun", "Space separated list of building names that can be tossed: Dispenser Teleporter Sentrygun");
+	ConVar cvarForce = CreateConVar("sm_toss_building_force", "520", "Base force to use when throwing buildings", _, true, 100.0, true, 10000.0);
+	cvarTypes.AddChangeHook(OnTossBuildingTypesChanged);
+	cvarForce.AddChangeHook(OnTossBuildingForceChanged);
+	//always load values on startup
+	char buffer[128];
+	cvarTypes.GetString(buffer, sizeof(buffer));
+	OnTossBuildingTypesChanged(cvarTypes, buffer, buffer);
+	OnTossBuildingForceChanged(cvarForce, NULL_STRING, NULL_STRING);//doesn't use passed string
+	//load actual values from config
+	AutoExecConfig();
+	PrintToServer("Types: %i, Force: %f", g_iBlockTypes, g_flThrowForce);
+	
+	ConVar cvarVersion = CreateConVar("sm_toss_building_version", PLUGIN_VERSION, "", FCVAR_NOTIFY|FCVAR_DONTRECORD);
+	cvarVersion.AddChangeHook(LockConVar);
+	cvarVersion.SetString(PLUGIN_VERSION);
+	delete cvarVersion;
 	
 	HookEvent("player_carryobject", OnPlayerCarryObject);
 	HookEvent("player_builtobject", OnPlayerBuiltObject);
@@ -82,7 +105,26 @@ public void OnPluginStart() {
 public void LockConVar(ConVar convar, const char[] oldValue, const char[] newValue) {
 	if (!StrEqual(newValue, PLUGIN_VERSION)) convar.SetString(PLUGIN_VERSION);
 }
-
+public void OnTossBuildingTypesChanged(ConVar convar, const char[] oldValue, const char[] newValue) {
+	if (StrContains(newValue, "dispenser", false)>=0) {
+		g_iBlockTypes &=~ TBFLAG_DISPENSER;
+	} else {
+		g_iBlockTypes |= TBFLAG_DISPENSER;
+	}
+	if (StrContains(newValue, "teleporter", false)>=0) {
+		g_iBlockTypes &=~ TBFLAG_TELEPORTER;
+	} else {
+		g_iBlockTypes |= TBFLAG_TELEPORTER;
+	}
+	if (StrContains(newValue, "sentry", false)>=0) {
+		g_iBlockTypes &=~ TBFLAG_SENTRYGUN;
+	} else {
+		g_iBlockTypes |= TBFLAG_SENTRYGUN;
+	}
+}
+public void OnTossBuildingForceChanged(ConVar convar, const char[] oldValue, const char[] newValue) {
+	g_flThrowForce = convar.FloatValue;
+}
 
 public void OnMapStart() {
 	g_aAirbornObjects.Clear();
@@ -92,15 +134,33 @@ public void OnMapStart() {
 public void OnClientDisconnect(int client) {
 	g_bPlayerThrow[client] = false;
 	g_flClientLastBeep[client] = 0.0;
+	g_flClientLastNotif[client] = 0.0;
+}
+
+public void OnAllPluginsLoaded() {
+	g_bDepHudMsg = LibraryExists("tf2hudmsg");
+}
+public void OnLibraryAdded(const char[] name) {
+	if (StrEqual(name, "tf2hudmsg")) g_bDepHudMsg = true;
+}
+public void OnLibraryRemoved(const char[] name) {
+	if (StrEqual(name, "tf2hudmsg")) g_bDepHudMsg = false;
 }
 
 public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3], float angles[3], int &weapon, int &subtype, int &cmdnum, int &tickcount, int &seed, int mouse[2]) {
 	if (!(1<=client<=MaxClients) || !IsClientInGame(client) || IsFakeClient(client)) return Plugin_Continue;
 	if ((buttons & IN_RELOAD)!=0 && !g_bPlayerThrow[client]) {
-		//trigger force build and throw on Reload
-		g_bPlayerThrow[client] = true;
-		if (CheckThrowPos(client)) StartBuilding(client);
-		g_bPlayerThrow[client] = false;
+		if ( IsThrowBlocked(client) ) {
+			if (GetClientTime(client) - g_flClientLastNotif[client] >= 1.0) {
+				g_flClientLastNotif[client] = GetClientTime(client);
+				HudNotify(client, "You can't toss this building");
+			}
+		} else {
+			//trigger force build and throw on Reload
+			g_bPlayerThrow[client] = true;
+			if (CheckThrowPos(client)) StartBuilding(client);
+			g_bPlayerThrow[client] = false;
+		}
 	}
 	return Plugin_Continue;
 }
@@ -109,8 +169,8 @@ public void OnPlayerCarryObject(Event event, const char[] name, bool dontBroadca
 	int owner = GetClientOfUserId(event.GetInt("userid"));
 	int objecttype = event.GetInt("object");
 	int building = event.GetInt("index");
-	if ((BUILDING_DISPENSER <= objecttype <= BUILDING_SENTRYGUN) && IsClientInGame(owner) && IsValidEdict(building)) {
-		PrintHintText(owner, "Press [RELOAD] to toss the building");
+	if ((BUILDING_DISPENSER <= objecttype <= BUILDING_SENTRYGUN) && IsClientInGame(owner) && IsValidEdict(building) && ( g_iBlockTypes&(1<<objecttype) )==0) {
+		HudNotify(owner, "Press [RELOAD] to toss the building");
 	}
 }
 public void OnPlayerBuiltObject(Event event, const char[] name, bool dontBroadcast) {
@@ -172,8 +232,8 @@ public void ThrowBuilding(any buildref) {
 	//get angles/velocity
 	GetClientEyeAngles(owner, angles);
 	GetAngleVectors(angles, fwd, NULL_VECTOR, NULL_VECTOR);
-	ScaleVector(fwd, 520.0);
-	fwd[2]+=160.0;//bit more archy
+	ScaleVector(fwd, g_flThrowForce);
+	fwd[2] += (g_flThrowForce/3.25);//bit more archy
 	Entity_GetAbsVelocity(owner, velocity);
 	AddVectors(velocity, fwd, velocity);
 	
@@ -292,6 +352,29 @@ void ValidateThrown() {
 	}
 }
 
+/** Invalid preconditions PASS! as this is used for message printing only */
+bool IsThrowBlocked(int client) {
+	if (!IsClientInGame(client) || !IsPlayerAlive(client))
+		return false;
+	int weapon = Client_GetActiveWeapon(client);
+	int item = IsValidEdict(weapon) ? GetEntProp(weapon, Prop_Send, "m_iItemDefinitionIndex") : -1;
+	if (item != 28)
+		return false; //require builder
+	int bstate = GetEntProp(weapon, Prop_Send, "m_iBuildState");
+	if (bstate != BS_PLACING && bstate != BS_PLACING_INVALID)
+		return false; //currently not placing
+	int objectToBuild = GetEntPropEnt(weapon, Prop_Send, "m_hObjectBeingBuilt");
+	if (objectToBuild == INVALID_ENT_REFERENCE) {
+		RequestFrame(FixNoObjectBeingHeld, GetClientUserId(client));
+		return false; //no object being buil!?
+	}
+	int type = GetEntProp(objectToBuild, Prop_Send, "m_iObjectType");
+	if (!(BUILDING_DISPENSER <= type <= BUILDING_SENTRYGUN))
+		return false; //supported buildings, not always correct on weapon_builder
+	
+	return ( g_iBlockTypes&(1<<type) )!=0;
+}
+
 bool CheckThrowPos(int client) {
 	if (g_iBlockFlags != 0) return false;
 	float eyes[3];
@@ -322,9 +405,6 @@ bool StartBuilding(int client) {
 	int item = IsValidEdict(weapon) ? GetEntProp(weapon, Prop_Send, "m_iItemDefinitionIndex") : -1;
 	if (item != 28)
 		return false; //require builder
-	int type = GetEntProp(weapon, Prop_Send, "m_iObjectType");
-	if (!(BUILDING_DISPENSER <= type <= BUILDING_SENTRYGUN))
-		return false; //supported buildings
 	int bstate = GetEntProp(weapon, Prop_Send, "m_iBuildState");
 	if (bstate != BS_PLACING && bstate != BS_PLACING_INVALID)
 		return false; //currently not placing
@@ -333,6 +413,10 @@ bool StartBuilding(int client) {
 		RequestFrame(FixNoObjectBeingHeld, GetClientUserId(client));
 		return false; //no object being buil!?
 	}
+	int type = GetEntProp(objectToBuild, Prop_Send, "m_iObjectType");
+	if (!(BUILDING_DISPENSER <= type <= BUILDING_SENTRYGUN))
+		return false; //supported buildings, not always correct on weapon_builder
+	
 	SetEntPropEnt(weapon, Prop_Send, "m_hOwner", client);
 	SetEntProp(weapon, Prop_Send, "m_iBuildState", BS_PLACING); //if placing_invalid
 	SDKCall(sdk_fnStartBuilding, weapon);
@@ -414,4 +498,18 @@ void Beep(int client) {
 		g_flClientLastBeep[client] = GetClientTime(client);
 		EmitSoundToClient(client, "common/wpn_denyselect.wav");//should aready be precached by game
 	}
+}
+
+void HudNotify(int client, const char[] format, any ...) {
+	char buffer[128];
+	VFormat(buffer, sizeof(buffer), format, 3);
+#if defined _inc_tf2hudmsg
+	if (g_bDepHudMsg)
+//		TF2_HudNotificationCustom(client, "obj_status_icon_wrench", TFTeam_Red, _, "%s", buffer);
+		TF2_HudNotificationCustom(client, "ico_build", TFTeam_Red, _, "%s", buffer);
+	else
+		PrintHintText(client, "%s", buffer);
+#else
+	PrintHintText(client, "%s", buffer);
+#endif
 }
