@@ -12,7 +12,7 @@
 #pragma newdecls required
 #pragma semicolon 1
 
-#define PLUGIN_VERSION "22w23a"
+#define PLUGIN_VERSION "22w23b"
 
 public Plugin myinfo = {
 	name = "[TF2] Toss Buildings",
@@ -352,9 +352,15 @@ void ValidateThrown() {
 		ScaleVector(vec,0.5);
 		//using this call we can get the world center
 		Phys_LocalToWorld(phys, pos, vec);
-		//ray end; send over half height down, so we can always find ground
+		//ray end
+		//teles are wider than high, find the largest dimension for ground testing
+		SubtractVectors(maxs,mins,vec);
+		float maxdim = vec[0];
+		if (vec[1] > maxdim) maxdim = vec[1];
+		if (vec[2] > maxdim) maxdim = vec[2];
+		//from pos, send the ray over half maxdim down, so we can always find ground
 		vec = pos;
-		vec[2] -= (maxs[2]-mins[2])*0.55;
+		vec[2] -= (maxdim)*0.55;
 		//make trace hull discy
 		mins[2] = 0.0; //7 up from bottom
 		maxs[2] = 1.0; //8 up from bottom
