@@ -12,7 +12,7 @@
 #pragma newdecls required
 #pragma semicolon 1
 
-#define PLUGIN_VERSION "22w22a"
+#define PLUGIN_VERSION "22w23a"
 
 public Plugin myinfo = {
 	name = "[TF2] Toss Buildings",
@@ -21,6 +21,8 @@ public Plugin myinfo = {
 	version = PLUGIN_VERSION,
 	url = "N/A",
 };
+
+#define MASK_BUILDINGS MASK_PLAYERSOLID_BRUSHONLY
 
 enum {
 	BUILDING_INVALID_OBJECT = ((1<<8)-1), // s8_t:-1
@@ -35,6 +37,13 @@ enum {
 	BS_PLACING,
 	BS_PLACING_INVALID,
 };
+
+enum struct AirbornData {
+	int physObject;
+	int building;
+	float yaw;
+	bool newBuild;
+}
 
 bool g_bPlayerThrow[MAXPLAYERS+1];
 Handle sdk_fnStartBuilding;
@@ -84,7 +93,6 @@ public void OnPluginStart() {
 	OnTossBuildingForceChanged(cvarForce, NULL_STRING, NULL_STRING);//doesn't use passed string
 	//load actual values from config
 	AutoExecConfig();
-	PrintToServer("Types: %i, Force: %f", g_iBlockTypes, g_flThrowForce);
 	
 	ConVar cvarVersion = CreateConVar("sm_toss_building_version", PLUGIN_VERSION, "", FCVAR_NOTIFY|FCVAR_DONTRECORD);
 	cvarVersion.AddChangeHook(LockConVar);
@@ -95,7 +103,7 @@ public void OnPluginStart() {
 	HookEvent("player_builtobject", OnPlayerBuiltObject);
 	HookEvent("player_dropobject", OnPlayerBuiltObject);
 	
-	g_aAirbornObjects = new ArrayList(3); //phys parent, object, thrown angle (yaw)
+	g_aAirbornObjects = new ArrayList(sizeof(AirbornData)); //phys parent, object, thrown angle (yaw)
 	
 	//let other plugins integrate :)
 	g_fwdToss = CreateGlobalForward("TF2_OnTossBuilding", ET_Event, Param_Cell, Param_Cell, Param_Cell);
@@ -153,7 +161,7 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 		if ( IsThrowBlocked(client) ) {
 			if (GetClientTime(client) - g_flClientLastNotif[client] >= 1.0) {
 				g_flClientLastNotif[client] = GetClientTime(client);
-				HudNotify(client, "You can't toss this building");
+				HudNotify(client, 0, "You can't toss this building");
 			}
 		} else {
 			//trigger force build and throw on Reload
@@ -170,7 +178,14 @@ public void OnPlayerCarryObject(Event event, const char[] name, bool dontBroadca
 	int objecttype = event.GetInt("object");
 	int building = event.GetInt("index");
 	if ((BUILDING_DISPENSER <= objecttype <= BUILDING_SENTRYGUN) && IsClientInGame(owner) && IsValidEdict(building) && ( g_iBlockTypes&(1<<objecttype) )==0) {
-		HudNotify(owner, "Press [RELOAD] to toss the building");
+		//small sanity check: was this building picked up while flagged as thrown?
+		if (g_aAirbornObjects.FindValue(EntIndexToEntRef(building), AirbornData::building) != -1) {
+			//visually destory the building, the check timer will clean up the phys prop later
+			SetVariantInt(1000);
+			AcceptEntityInput(building, "RemoveHealth");
+		} else {
+			HudNotify(owner, _, "Press [RELOAD] to toss the building");
+		}
 	}
 }
 public void OnPlayerBuiltObject(Event event, const char[] name, bool dontBroadcast) {
@@ -196,8 +211,20 @@ public Action Timer_PlaceBuildings(Handle timer) {
 }
 
 public bool TEF_HitSelfFilter(int entity, int contentsMask, any data) {
+	return entity != data;
+}
+public bool TEF_HitSelfFilterPassClients(int entity, int contentsMask, any data) {
 	return entity > MaxClients && entity != data;
 }
+public bool TEF_HitThrownFilter(int entity, int contentsMask, any data) {
+	if (!entity) return contentsMask != CONTENTS_EMPTY;
+	AirbornData edicts;
+	g_aAirbornObjects.GetArray(data,edicts);
+	int entref = EntIndexToEntRef(entity);
+	return entity > MaxClients && entref != edicts.physObject && entref != edicts.building;
+}
+
+
 public void ThrowBuilding(any buildref) {
 	int building = EntRefToEntIndex(buildref);
 	if (building == INVALID_ENT_REFERENCE) return;
@@ -246,7 +273,7 @@ public void ThrowBuilding(any buildref) {
 		case BUILDING_DISPENSER: DispatchKeyValue(phys, "model", "models/buildables/dispenser_light.mdl");
 		case BUILDING_TELEPORTER: DispatchKeyValue(phys, "model", "models/buildables/teleporter_light.mdl");
 	}
-	DispatchKeyValue(phys, "physicsmode", "1");
+	DispatchKeyValue(phys, "physicsmode", "2"); //don't push (hard collide) with player (1), but get pushed (soft collide)
 	DispatchKeyValueVector(phys, "origin", origin);
 	DispatchKeyValueVector(phys, "angles", angles);
 	Format(buffer, sizeof(buffer), "%i", GetEntProp(building, Prop_Send, "m_nSkin"));
@@ -255,25 +282,36 @@ public void ThrowBuilding(any buildref) {
 	else if (GetEntProp(building, Prop_Send, "m_bMiniBuilding")) buffer = "0.75";
 	else buffer = "1.0";
 	DispatchKeyValue(phys, "modelscale", buffer);//mini sentries are .75
-	DispatchKeyValue(phys, "solid", "6");
+//	DispatchKeyValue(phys, "solid", "2"); //2 bbox 6 vphysics
 	if (!DispatchSpawn(phys)) {
-		PrintToChat(owner, "Failed to spawn sentry prop");
+		PrintToChat(owner, "Failed to spawn physics prop");
 		return;
 	}
 	ActivateEntity(phys);
+	SetEntityRenderMode(phys, RENDER_NORMAL); //why is it sometimes not rendered?
 	
-	SetEntProp(building, Prop_Send, "m_bDisabled", 1);
+	//set properties to prevent the building from progressing construction
+	bool newlyBuilt = GetEntProp(building, Prop_Send, "m_bCarryDeploy")==0;
+	SetEntProp(building, Prop_Send, "m_bCarried", 1);
+	SetEntProp(building, Prop_Send, "m_bBuilding", 0);
+	if (newlyBuilt) { //set health above 66% to suppress the client side alert
+		int maxhp = TF2Util_GetEntityMaxHealth(building);
+		Entity_SetHealth(building, maxhp);
+	}
+	//put it in a state similar to carried for collision/rendering
 	Entity_SetSolidFlags(building, FSOLID_NOT_SOLID);
 	SetEntityRenderMode(building, RENDER_NONE);
 	TeleportEntity(building, origin, NULL_VECTOR, NULL_VECTOR);
+	//parent to phys and throw
 	SetVariantString("!activator");
 	AcceptEntityInput(building, "SetParent", phys);
 	Phys_ApplyForceCenter(phys, velocity);// works best
 	
-	any onade[3];
-	onade[0]=EntIndexToEntRef(phys);
-	onade[1]=EntIndexToEntRef(building);
-	onade[2]=angles[1];
+	AirbornData onade;
+	onade.physObject=EntIndexToEntRef(phys);
+	onade.building=EntIndexToEntRef(building);
+	onade.yaw=angles[1];
+	onade.newBuild=newlyBuilt;
 	g_aAirbornObjects.PushArray(onade);
 	
 	if (g_fwdTossPost.FunctionCount>0) {
@@ -285,19 +323,12 @@ public void ThrowBuilding(any buildref) {
 	}
 }
 
-public bool TEF_HitThrownFilter(int entity, int contentsMask, any data) {
-	int edicts[3];
-	g_aAirbornObjects.GetArray(data,edicts);
-	return entity > MaxClients && entity != EntRefToEntIndex(edicts[0]) && entity != EntRefToEntIndex(edicts[1]);
-}
-
 void ValidateThrown() {
 	for (int i=g_aAirbornObjects.Length-1; i>=0; i--) {
-		any data[3];
+		AirbornData data;
 		g_aAirbornObjects.GetArray(i,data);
-		int phys = EntRefToEntIndex(data[0]);
-		int obj = EntRefToEntIndex(data[1]);
-		float yaw = data[2];
+		int phys = EntRefToEntIndex(data.physObject);
+		int obj = EntRefToEntIndex(data.building);
 		//if at least one of the entities went away, something went wrong
 		// -> remove and continue
 		if (!IsValidEdict(phys)) {
@@ -312,42 +343,64 @@ void ValidateThrown() {
 			continue;
 		}
 		
-		float pos[3], vec[3];
-		Entity_GetAbsOrigin(phys, pos);
+		float mins[3],maxs[3],pos[3],vec[3];
+		//get a "disc" for collision
+		Entity_GetMinSize(phys,mins);
+		Entity_GetMaxSize(phys,maxs);
+		//find local center point, as mins/maxs is for the AABB
+		AddVectors(mins,maxs,vec);
+		ScaleVector(vec,0.5);
+		//using this call we can get the world center
+		Phys_LocalToWorld(phys, pos, vec);
+		//ray end; send over half height down, so we can always find ground
 		vec = pos;
-		vec[2] -= 16.0;
-		pos[2] += 8.0;
-		Handle trace = TR_TraceRayFilterEx(pos, vec, MASK_SOLID, RayType_EndPoint, TEF_HitThrownFilter, i);
-		if (!TR_DidHit(trace)) {
-			delete trace;
-			continue; //no ground below (FL_ONGROUND failed?)
-		} else {
+		vec[2] -= (maxs[2]-mins[2])*0.55;
+		//make trace hull discy
+		mins[2] = 0.0; //7 up from bottom
+		maxs[2] = 1.0; //8 up from bottom
+		//scan
+//		if (TR_PointOutsideWorld(pos)) {
+//			AcceptEntityInput(phys, "Kill");
+//			AcceptEntityInput(obj, "Kill");
+//			g_aAirbornObjects.Erase(i);
+//			PrintToServer("Building fell out of world, destroying!");
+//			continue;
+//		}
+		Handle trace = TR_TraceHullFilterEx(pos,vec, mins,maxs, MASK_BUILDINGS, TEF_HitThrownFilter, i);
+		if (TR_DidHit(trace)) {
 			TR_GetEndPosition(pos, trace);
-			TR_GetPlaneNormal(trace, vec); //vanilla is not checking this
+			TR_GetPlaneNormal(trace, vec); //vanilla is not snapping to this
 			delete trace;
-			//check surface slope
-			float up[3]; up[2]=1.0;
-			float slope = ArcCosine( GetVectorDotProduct(vec, up) ) * 180.0/3.1415927;
-			if (slope > 35.0) {
-				//this slope is too steep to place a building
-				continue;
-			}
-			//construct angles by random direction, using standard right to get propper forward
-			float angles[3];
-			angles[1]=yaw;
-			//clear parent
-			AcceptEntityInput(obj, "ClearParent");
-			//fix building
-			float zeros[3];
-			TeleportEntity(obj, pos, angles, zeros); //use 0-velocity to calm down bouncyness
-			//restore other props
-			SetEntProp(obj, Prop_Send, "m_bDisabled", 0);
-			Entity_RemoveSolidFlags(obj, FSOLID_NOT_SOLID);
-			SetEntityRenderMode(obj, RENDER_NORMAL);
-			//check valid
-			CreateTimer(0.1, ValidateBuilding, EntIndexToEntRef(obj), TIMER_FLAG_NO_MAPCHANGE);
+		} else {
+			delete trace;
+			continue;
 		}
-		RemoveEntity(phys);
+		
+		//check surface slope
+		float up[3]; up[2]=1.0;
+		float slope = ArcCosine( GetVectorDotProduct(vec, up) ) * 180.0/3.1415927;
+		if (slope > 35.0) {
+			//this slope is too steep to place a building. let it roll
+			continue;
+		}
+		//construct angles by random direction, using standard right to get propper forward
+		float angles[3];
+		angles[1]=data.yaw;
+		//clear parent
+		AcceptEntityInput(obj, "ClearParent");
+		//fix building
+		float zeros[3];
+		TeleportEntity(obj, pos, angles, zeros); //use 0-velocity to calm down bouncyness
+		//restore other props: get it out of peudo carry state 
+		SetEntProp(obj, Prop_Send, "m_bBuilding", 1);
+		SetEntProp(obj, Prop_Send, "m_bCarried", 0);
+		if (data.newBuild) Entity_SetHealth(obj,1,_,false);
+		Entity_RemoveSolidFlags(obj, FSOLID_NOT_SOLID);
+		SetEntityRenderMode(obj, RENDER_NORMAL);
+		//check valid
+		CreateTimer(0.1, ValidateBuilding, EntIndexToEntRef(obj), TIMER_FLAG_NO_MAPCHANGE);
+		//we no longer need the "carrier"
+		AcceptEntityInput(phys, "Kill");
 		g_aAirbornObjects.Erase(i);
 	}
 }
@@ -390,7 +443,7 @@ bool CheckThrowPos(int client) {
 	ScaleVector(fwd, 64.0);
 	AddVectors(origin, fwd, origin);
 	//ensure we see the target
-	Handle trace = TR_TraceRayFilterEx(eyes, origin, MASK_SOLID, RayType_EndPoint, TEF_HitSelfFilter, client);
+	Handle trace = TR_TraceRayFilterEx(eyes, origin, MASK_PLAYERSOLID, RayType_EndPoint, TEF_HitSelfFilterPassClients, client);
 	bool hit = TR_DidHit(trace);
 	delete trace;
 	//can't see throw point (prevent through walls)? make noise
@@ -398,29 +451,29 @@ bool CheckThrowPos(int client) {
 	return !hit;
 }
 
-bool StartBuilding(int client) {
+int StartBuilding(int client) {
 	if (!IsClientInGame(client) || !IsPlayerAlive(client))
-		return false;
+		return -1;
 	int weapon = Client_GetActiveWeapon(client);
 	int item = IsValidEdict(weapon) ? GetEntProp(weapon, Prop_Send, "m_iItemDefinitionIndex") : -1;
 	if (item != 28)
-		return false; //require builder
+		return -1; //require builder
 	int bstate = GetEntProp(weapon, Prop_Send, "m_iBuildState");
 	if (bstate != BS_PLACING && bstate != BS_PLACING_INVALID)
-		return false; //currently not placing
+		return -1; //currently not placing
 	int objectToBuild = GetEntPropEnt(weapon, Prop_Send, "m_hObjectBeingBuilt");
 	if (objectToBuild == INVALID_ENT_REFERENCE) {
 		RequestFrame(FixNoObjectBeingHeld, GetClientUserId(client));
-		return false; //no object being buil!?
+		return -1; //no object being buil!?
 	}
 	int type = GetEntProp(objectToBuild, Prop_Send, "m_iObjectType");
 	if (!(BUILDING_DISPENSER <= type <= BUILDING_SENTRYGUN))
-		return false; //supported buildings, not always correct on weapon_builder
+		return -1; //supported buildings, not always correct on weapon_builder
 	
 	SetEntPropEnt(weapon, Prop_Send, "m_hOwner", client);
 	SetEntProp(weapon, Prop_Send, "m_iBuildState", BS_PLACING); //if placing_invalid
 	SDKCall(sdk_fnStartBuilding, weapon);
-	return true;
+	return objectToBuild;
 }
 
 void FixNoObjectBeingHeld(int user) {
@@ -476,8 +529,9 @@ public Action ValidateBuilding(Handle timer, any building) {
 	AddVectors(mins,four,mins);
 	SubtractVectors(maxs,four,maxs);
 	
-	Handle trace = TR_TraceHullFilterEx(origin, origin, mins, maxs, MASK_SOLID, TEF_HitSelfFilter, obj);
+	Handle trace = TR_TraceHullFilterEx(origin, origin, mins, maxs, MASK_BUILDINGS, TEF_HitSelfFilter, obj);
 	bool invalid = TR_DidHit(trace) || TF2Util_IsPointInRespawnRoom(origin, obj);
+	if (TR_DidHit(trace)) PrintToServer("Collided with %i", TR_GetEntityIndex(trace));
 	delete trace;
 	if (invalid) {
 		SetVariantInt(1000);
@@ -500,13 +554,13 @@ void Beep(int client) {
 	}
 }
 
-void HudNotify(int client, const char[] format, any ...) {
+void HudNotify(int client, int color=-1, const char[] format, any ...) {
 	char buffer[128];
 	VFormat(buffer, sizeof(buffer), format, 3);
 #if defined _inc_tf2hudmsg
 	if (g_bDepHudMsg)
 //		TF2_HudNotificationCustom(client, "obj_status_icon_wrench", TFTeam_Red, _, "%s", buffer);
-		TF2_HudNotificationCustom(client, "ico_build", TFTeam_Red, _, "%s", buffer);
+		TF2_HudNotificationCustom(client, "ico_build", color, _, "%s", buffer);
 	else
 		PrintHintText(client, "%s", buffer);
 #else
