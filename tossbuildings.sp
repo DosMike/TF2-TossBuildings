@@ -12,7 +12,7 @@
 #pragma newdecls required
 #pragma semicolon 1
 
-#define PLUGIN_VERSION "22w23b"
+#define PLUGIN_VERSION "22w24a"
 
 public Plugin myinfo = {
 	name = "[TF2] Toss Buildings",
@@ -43,6 +43,7 @@ enum struct AirbornData {
 	int building;
 	float yaw;
 	bool newBuild;
+	float prevPos[3];
 }
 
 bool g_bPlayerThrow[MAXPLAYERS+1];
@@ -59,6 +60,7 @@ int g_iBlockFlags;
 #define TBFLAG_SENTRYGUN (1<<BUILDING_SENTRYGUN)
 int g_iBlockTypes;
 float g_flThrowForce;
+int g_iBuildingModelIndexLV1[3];
 
 GlobalForward g_fwdToss, g_fwdTossPost, g_fwdLanded;
 
@@ -137,6 +139,13 @@ public void OnTossBuildingForceChanged(ConVar convar, const char[] oldValue, con
 public void OnMapStart() {
 	g_aAirbornObjects.Clear();
 	CreateTimer(0.1, Timer_PlaceBuildings, _, TIMER_REPEAT|TIMER_FLAG_NO_MAPCHANGE);	
+	
+	for (int i=0;i<3;i++) {
+		char buffer[PLATFORM_MAX_PATH];
+		GetModelForBuilding(i, buffer, sizeof(buffer));
+		if ((g_iBuildingModelIndexLV1[i] = PrecacheModel(buffer, true))==0)
+			ThrowError("Could not precache building model for type %i", i);
+	}
 }
 
 public void OnClientDisconnect(int client) {
@@ -181,8 +190,7 @@ public void OnPlayerCarryObject(Event event, const char[] name, bool dontBroadca
 		//small sanity check: was this building picked up while flagged as thrown?
 		if (g_aAirbornObjects.FindValue(EntIndexToEntRef(building), AirbornData::building) != -1) {
 			//visually destory the building, the check timer will clean up the phys prop later
-			SetVariantInt(1000);
-			AcceptEntityInput(building, "RemoveHealth");
+			BreakBuilding(building);
 		} else {
 			HudNotify(owner, _, "Press [RELOAD] to toss the building");
 		}
@@ -223,7 +231,6 @@ public bool TEF_HitThrownFilter(int entity, int contentsMask, any data) {
 	int entref = EntIndexToEntRef(entity);
 	return entity > MaxClients && entref != edicts.physObject && entref != edicts.building;
 }
-
 
 public void ThrowBuilding(any buildref) {
 	int building = EntRefToEntIndex(buildref);
@@ -268,11 +275,8 @@ public void ThrowBuilding(any buildref) {
 	if (phys == INVALID_ENT_REFERENCE) return;
 	
 	char buffer[PLATFORM_MAX_PATH];
-	switch (type) {
-		case BUILDING_SENTRYGUN: DispatchKeyValue(phys, "model", "models/buildables/sentry1.mdl");
-		case BUILDING_DISPENSER: DispatchKeyValue(phys, "model", "models/buildables/dispenser_light.mdl");
-		case BUILDING_TELEPORTER: DispatchKeyValue(phys, "model", "models/buildables/teleporter_light.mdl");
-	}
+	GetModelForBuilding(type, buffer, sizeof(buffer));
+	DispatchKeyValue(phys, "model", buffer);
 	DispatchKeyValue(phys, "physicsmode", "2"); //don't push (hard collide) with player (1), but get pushed (soft collide)
 	DispatchKeyValueVector(phys, "origin", origin);
 	DispatchKeyValueVector(phys, "angles", angles);
@@ -288,6 +292,7 @@ public void ThrowBuilding(any buildref) {
 		return;
 	}
 	ActivateEntity(phys);
+//	Entity_SetCollisionGroup(phys, COLLISION_GROUP_DEBRIS_TRIGGER);
 	SetEntityRenderMode(phys, RENDER_NORMAL); //why is it sometimes not rendered?
 	
 	//set properties to prevent the building from progressing construction
@@ -312,6 +317,7 @@ public void ThrowBuilding(any buildref) {
 	onade.building=EntIndexToEntRef(building);
 	onade.yaw=angles[1];
 	onade.newBuild=newlyBuilt;
+	onade.prevPos=origin;
 	g_aAirbornObjects.PushArray(onade);
 	
 	if (g_fwdTossPost.FunctionCount>0) {
@@ -332,7 +338,7 @@ void ValidateThrown() {
 		//if at least one of the entities went away, something went wrong
 		// -> remove and continue
 		if (!IsValidEdict(phys)) {
-			if (IsValidEdict(obj)) AcceptEntityInput(obj, "Kill");
+			if (IsValidEdict(obj)) BreakBuilding(obj);
 			g_aAirbornObjects.Erase(i);
 			PrintToServer("Phys entity invalid");
 			continue;
@@ -345,22 +351,31 @@ void ValidateThrown() {
 		
 		float mins[3],maxs[3],pos[3],vec[3];
 		//get a "disc" for collision
-		Entity_GetMinSize(phys,mins);
-		Entity_GetMaxSize(phys,maxs);
+		Entity_GetMinSize(obj,mins);
+		Entity_GetMaxSize(obj,maxs);
 		//find local center point, as mins/maxs is for the AABB
 		AddVectors(mins,maxs,vec);
 		ScaleVector(vec,0.5);
 		//using this call we can get the world center
-		Phys_LocalToWorld(phys, pos, vec);
-		//ray end
+		Phys_LocalToWorld(obj, pos, vec);
+		//check for playerclips
+		TR_TraceRayFilter(data.prevPos, pos, CONTENTS_PLAYERCLIP, RayType_EndPoint, TEF_HitThrownFilter, i);
+		if (TR_DidHit()) {
+			BreakBuilding(obj);
+			AcceptEntityInput(phys, "Kill");
+			g_aAirbornObjects.Erase(i);
+			continue;
+		}
+		data.prevPos = pos;
+		g_aAirbornObjects.SetArray(i, data); //update position vector
+		//get ray end
 		//teles are wider than high, find the largest dimension for ground testing
 		SubtractVectors(maxs,mins,vec);
-		float maxdim = vec[0];
-		if (vec[1] > maxdim) maxdim = vec[1];
-		if (vec[2] > maxdim) maxdim = vec[2];
+		float offz = vec[2] * 0.55;
+		if (offz < 24.0) offz = 24.0;
 		//from pos, send the ray over half maxdim down, so we can always find ground
 		vec = pos;
-		vec[2] -= (maxdim)*0.55;
+		vec[2] -= offz;
 		//make trace hull discy
 		mins[2] = 0.0; //7 up from bottom
 		maxs[2] = 1.0; //8 up from bottom
@@ -372,15 +387,12 @@ void ValidateThrown() {
 //			PrintToServer("Building fell out of world, destroying!");
 //			continue;
 //		}
-		Handle trace = TR_TraceHullFilterEx(pos,vec, mins,maxs, MASK_BUILDINGS, TEF_HitThrownFilter, i);
-		if (TR_DidHit(trace)) {
-			TR_GetEndPosition(pos, trace);
-			TR_GetPlaneNormal(trace, vec); //vanilla is not snapping to this
-			delete trace;
-		} else {
-			delete trace;
+		TR_TraceHullFilter(pos,vec, mins,maxs, MASK_BUILDINGS, TEF_HitThrownFilter, i);
+		if (!TR_DidHit()) {
 			continue;
 		}
+		TR_GetEndPosition(pos);
+		TR_GetPlaneNormal(INVALID_HANDLE, vec); //vanilla is not snapping to this
 		
 		//check surface slope
 		float up[3]; up[2]=1.0;
@@ -400,7 +412,16 @@ void ValidateThrown() {
 		//restore other props: get it out of peudo carry state 
 		SetEntProp(obj, Prop_Send, "m_bBuilding", 1);
 		SetEntProp(obj, Prop_Send, "m_bCarried", 0);
-		if (data.newBuild) Entity_SetHealth(obj,1,_,false);
+		SetEntProp(obj, Prop_Send, "m_bCarryDeploy", data.newBuild?0:1);
+		if (data.newBuild) {
+			Entity_SetHealth(obj,1,_,false);
+		} else if (GetEntProp(obj, Prop_Send, "m_iUpgradeLevel") > 1) {
+			//properly appear as level 1 building after placement
+			int type = GetEntProp(obj, Prop_Send, "m_iObjectType");
+			Entity_SetModelIndex(obj, g_iBuildingModelIndexLV1[type]);
+			SetEntProp(obj, Prop_Send, "m_iUpgradeLevel", 1);
+			//the sequence would have to be restarted as well, but i couldn't find any way to do that
+		}
 		Entity_RemoveSolidFlags(obj, FSOLID_NOT_SOLID);
 		SetEntityRenderMode(obj, RENDER_NORMAL);
 		//check valid
@@ -537,12 +558,8 @@ public Action ValidateBuilding(Handle timer, any building) {
 	
 	Handle trace = TR_TraceHullFilterEx(origin, origin, mins, maxs, MASK_BUILDINGS, TEF_HitSelfFilter, obj);
 	bool invalid = TR_DidHit(trace) || TF2Util_IsPointInRespawnRoom(origin, obj);
-	if (TR_DidHit(trace)) PrintToServer("Collided with %i", TR_GetEntityIndex(trace));
 	delete trace;
-	if (invalid) {
-		SetVariantInt(1000);
-		AcceptEntityInput(obj, "RemoveHealth");
-	}
+	if (invalid) BreakBuilding(obj);
 	if (g_fwdLanded.FunctionCount>0) {
 		Call_StartForward(g_fwdLanded);
 		Call_PushCell(building);
@@ -550,6 +567,11 @@ public Action ValidateBuilding(Handle timer, any building) {
 		Call_Finish();
 	}
 	return Plugin_Stop;
+}
+
+void BreakBuilding(int building) {
+	SetVariantInt(RoundToCeil(Entity_GetHealth(building)*1.5));
+	AcceptEntityInput(building, "RemoveHealth");
 }
 
 void Beep(int client) {
@@ -572,4 +594,13 @@ void HudNotify(int client, int color=-1, const char[] format, any ...) {
 #else
 	PrintHintText(client, "%s", buffer);
 #endif
+}
+
+void GetModelForBuilding(int buildingType, char[] model, int maxlen) {
+	switch (buildingType) {
+		case BUILDING_SENTRYGUN: strcopy(model, maxlen, "models/buildables/sentry1.mdl");
+		case BUILDING_DISPENSER: strcopy(model, maxlen, "models/buildables/dispenser_light.mdl");
+		case BUILDING_TELEPORTER: strcopy(model, maxlen, "models/buildables/teleporter_light.mdl");
+		default: ThrowError("Unsupported Building Type %i", buildingType);
+	}
 }
