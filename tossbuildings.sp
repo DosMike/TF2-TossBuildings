@@ -12,7 +12,7 @@
 #pragma newdecls required
 #pragma semicolon 1
 
-#define PLUGIN_VERSION "22w24a"
+#define PLUGIN_VERSION "22w25a"
 
 public Plugin myinfo = {
 	name = "[TF2] Toss Buildings",
@@ -59,6 +59,7 @@ int g_iBlockFlags;
 #define TBFLAG_TELEPORTER (1<<BUILDING_TELEPORTER)
 #define TBFLAG_SENTRYGUN (1<<BUILDING_SENTRYGUN)
 int g_iBlockTypes;
+int g_iNoOOBTypes;
 float g_flThrowForce;
 int g_iBuildingModelIndexLV1[3];
 
@@ -86,15 +87,22 @@ public void OnPluginStart() {
 	
 	ConVar cvarTypes = CreateConVar("sm_toss_building_types", "dispenser teleporter sentrygun", "Space separated list of building names that can be tossed: Dispenser Teleporter Sentrygun");
 	ConVar cvarForce = CreateConVar("sm_toss_building_force", "520", "Base force to use when throwing buildings", _, true, 100.0, true, 10000.0);
+	ConVar cvarOOB = CreateConVar("sm_toss_building_breakoob", "dispenser teleporter sentrygun", "Space separated list of building names that break out of bounds: Dispenser Teleporter Sentrygun");
 	cvarTypes.AddChangeHook(OnTossBuildingTypesChanged);
 	cvarForce.AddChangeHook(OnTossBuildingForceChanged);
+	cvarOOB.AddChangeHook(OnTossBuildingOOBChanged);
 	//always load values on startup
 	char buffer[128];
 	cvarTypes.GetString(buffer, sizeof(buffer));
 	OnTossBuildingTypesChanged(cvarTypes, buffer, buffer);
 	OnTossBuildingForceChanged(cvarForce, NULL_STRING, NULL_STRING);//doesn't use passed string
+	cvarOOB.GetString(buffer, sizeof(buffer));
+	OnTossBuildingOOBChanged(cvarOOB, buffer, buffer);
 	//load actual values from config
 	AutoExecConfig();
+	delete cvarTypes;
+	delete cvarForce;
+	delete cvarOOB;
 	
 	ConVar cvarVersion = CreateConVar("sm_toss_building_version", PLUGIN_VERSION, "", FCVAR_NOTIFY|FCVAR_DONTRECORD);
 	cvarVersion.AddChangeHook(LockConVar);
@@ -116,24 +124,30 @@ public void LockConVar(ConVar convar, const char[] oldValue, const char[] newVal
 	if (!StrEqual(newValue, PLUGIN_VERSION)) convar.SetString(PLUGIN_VERSION);
 }
 public void OnTossBuildingTypesChanged(ConVar convar, const char[] oldValue, const char[] newValue) {
-	if (StrContains(newValue, "dispenser", false)>=0) {
-		g_iBlockTypes &=~ TBFLAG_DISPENSER;
-	} else {
-		g_iBlockTypes |= TBFLAG_DISPENSER;
-	}
-	if (StrContains(newValue, "teleporter", false)>=0) {
-		g_iBlockTypes &=~ TBFLAG_TELEPORTER;
-	} else {
-		g_iBlockTypes |= TBFLAG_TELEPORTER;
-	}
-	if (StrContains(newValue, "sentry", false)>=0) {
-		g_iBlockTypes &=~ TBFLAG_SENTRYGUN;
-	} else {
-		g_iBlockTypes |= TBFLAG_SENTRYGUN;
-	}
+	_ParseTypesTo(g_iBlockTypes, newValue);
 }
 public void OnTossBuildingForceChanged(ConVar convar, const char[] oldValue, const char[] newValue) {
 	g_flThrowForce = convar.FloatValue;
+}
+public void OnTossBuildingOOBChanged(ConVar convar, const char[] oldValue, const char[] newValue) {
+	_ParseTypesTo(g_iNoOOBTypes, newValue);
+}
+static void _ParseTypesTo(int& value, const char[] typesString) {
+	if (StrContains(typesString, "dispenser", false)>=0) {
+		value &=~ TBFLAG_DISPENSER;
+	} else {
+		value |= TBFLAG_DISPENSER;
+	}
+	if (StrContains(typesString, "teleporter", false)>=0) {
+		value &=~ TBFLAG_TELEPORTER;
+	} else {
+		value |= TBFLAG_TELEPORTER;
+	}
+	if (StrContains(typesString, "sentry", false)>=0) {
+		value &=~ TBFLAG_SENTRYGUN;
+	} else {
+		value |= TBFLAG_SENTRYGUN;
+	}
 }
 
 public void OnMapStart() {
@@ -348,6 +362,7 @@ void ValidateThrown() {
 			PrintToServer("Building entity invalid");
 			continue;
 		}
+		int type = GetEntProp(obj, Prop_Send, "m_iObjectType");
 		
 		float mins[3],maxs[3],pos[3],vec[3];
 		//get a "disc" for collision
@@ -359,12 +374,14 @@ void ValidateThrown() {
 		//using this call we can get the world center
 		Phys_LocalToWorld(obj, pos, vec);
 		//check for playerclips
-		TR_TraceRayFilter(data.prevPos, pos, CONTENTS_PLAYERCLIP, RayType_EndPoint, TEF_HitThrownFilter, i);
-		if (TR_DidHit()) {
-			BreakBuilding(obj);
-			AcceptEntityInput(phys, "Kill");
-			g_aAirbornObjects.Erase(i);
-			continue;
+		if (BUILDING_DISPENSER <= type <= BUILDING_SENTRYGUN && (g_iNoOOBTypes & (1<<type))!=0 ) {
+			TR_TraceRayFilter(data.prevPos, pos, CONTENTS_PLAYERCLIP, RayType_EndPoint, TEF_HitThrownFilter, i);
+			if (TR_DidHit()) {
+				BreakBuilding(obj);
+				AcceptEntityInput(phys, "Kill");
+				g_aAirbornObjects.Erase(i);
+				continue;
+			}
 		}
 		data.prevPos = pos;
 		g_aAirbornObjects.SetArray(i, data); //update position vector
@@ -417,7 +434,6 @@ void ValidateThrown() {
 			Entity_SetHealth(obj,1,_,false);
 		} else if (GetEntProp(obj, Prop_Send, "m_iUpgradeLevel") > 1) {
 			//properly appear as level 1 building after placement
-			int type = GetEntProp(obj, Prop_Send, "m_iObjectType");
 			Entity_SetModelIndex(obj, g_iBuildingModelIndexLV1[type]);
 			SetEntProp(obj, Prop_Send, "m_iUpgradeLevel", 1);
 			//the sequence would have to be restarted as well, but i couldn't find any way to do that
@@ -543,6 +559,21 @@ void FixNoObjectBeingHeld(int user) {
 //	return SDKCall(sdk_fnIsPlacementPosValid, building);
 //}
 
+//wow, searching a type of entity at a certain location sure sucks
+static bool bTEEFuncNobuildFound;
+//return true to continue search
+public bool TEE_SearchFuncNobuild(int entity, any data) {
+	char classname[32];
+	if (entity == data) return true;
+	GetEntityClassname(entity, classname, sizeof(classname));
+	PrintToServer("Found %s (%i)", classname, entity);
+	if (StrEqual(classname, "func_nobuild")) {
+		bTEEFuncNobuildFound = true;
+		return false;
+	}
+	return true;
+}
+
 public Action ValidateBuilding(Handle timer, any building) {
 	int obj = EntRefToEntIndex(building);
 	if (obj == INVALID_ENT_REFERENCE) return Plugin_Stop;
@@ -556,9 +587,17 @@ public Action ValidateBuilding(Handle timer, any building) {
 	AddVectors(mins,four,mins);
 	SubtractVectors(maxs,four,maxs);
 	
-	Handle trace = TR_TraceHullFilterEx(origin, origin, mins, maxs, MASK_BUILDINGS, TEF_HitSelfFilter, obj);
-	bool invalid = TR_DidHit(trace) || TF2Util_IsPointInRespawnRoom(origin, obj);
-	delete trace;
+	TR_TraceHullFilter(origin, origin, mins, maxs, MASK_BUILDINGS, TEF_HitSelfFilter, obj);
+	bool invalid = TR_DidHit() || TF2Util_IsPointInRespawnRoom(origin, obj);
+	if (!invalid) {
+		//look for nobuild areas
+		bTEEFuncNobuildFound = false;
+		TR_EnumerateEntitiesHull(origin, origin, mins, maxs, PARTITION_TRIGGER_EDICTS, TEE_SearchFuncNobuild, obj);
+		if (bTEEFuncNobuildFound) {
+			invalid = true;
+		}
+	}
+	
 	if (invalid) BreakBuilding(obj);
 	if (g_fwdLanded.FunctionCount>0) {
 		Call_StartForward(g_fwdLanded);
