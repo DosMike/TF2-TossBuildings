@@ -12,7 +12,7 @@
 #pragma newdecls required
 #pragma semicolon 1
 
-#define PLUGIN_VERSION "22w25a"
+#define PLUGIN_VERSION "22w25b"
 
 public Plugin myinfo = {
 	name = "[TF2] Toss Buildings",
@@ -41,6 +41,7 @@ enum {
 enum struct AirbornData {
 	int physObject;
 	int building;
+	int upright;
 	float yaw;
 	bool newBuild;
 	float prevPos[3];
@@ -61,6 +62,7 @@ int g_iBlockFlags;
 int g_iBlockTypes;
 int g_iNoOOBTypes;
 float g_flThrowForce;
+float g_flUprightForce;
 int g_iBuildingModelIndexLV1[3];
 
 GlobalForward g_fwdToss, g_fwdTossPost, g_fwdLanded;
@@ -87,21 +89,25 @@ public void OnPluginStart() {
 	
 	ConVar cvarTypes = CreateConVar("sm_toss_building_types", "dispenser teleporter sentrygun", "Space separated list of building names that can be tossed: Dispenser Teleporter Sentrygun");
 	ConVar cvarForce = CreateConVar("sm_toss_building_force", "520", "Base force to use when throwing buildings", _, true, 100.0, true, 10000.0);
+	ConVar cvarUpright = CreateConVar("sm_toss_building_upright", "0", "How much to pull the prop upright in degree/sec. Will somethwat prevent the prop twriling, 0 to disable", _, true, 0.0, true, 3600.0);
 	ConVar cvarOOB = CreateConVar("sm_toss_building_breakoob", "dispenser teleporter sentrygun", "Space separated list of building names that break out of bounds: Dispenser Teleporter Sentrygun");
 	cvarTypes.AddChangeHook(OnTossBuildingTypesChanged);
 	cvarForce.AddChangeHook(OnTossBuildingForceChanged);
+	cvarUpright.AddChangeHook(OnTossBuildingUprightChanged);
 	cvarOOB.AddChangeHook(OnTossBuildingOOBChanged);
 	//always load values on startup
 	char buffer[128];
 	cvarTypes.GetString(buffer, sizeof(buffer));
 	OnTossBuildingTypesChanged(cvarTypes, buffer, buffer);
 	OnTossBuildingForceChanged(cvarForce, NULL_STRING, NULL_STRING);//doesn't use passed string
+	OnTossBuildingUprightChanged(cvarUpright, NULL_STRING, NULL_STRING);//doesn't use passed string
 	cvarOOB.GetString(buffer, sizeof(buffer));
 	OnTossBuildingOOBChanged(cvarOOB, buffer, buffer);
 	//load actual values from config
 	AutoExecConfig();
 	delete cvarTypes;
 	delete cvarForce;
+	delete cvarUpright;
 	delete cvarOOB;
 	
 	ConVar cvarVersion = CreateConVar("sm_toss_building_version", PLUGIN_VERSION, "", FCVAR_NOTIFY|FCVAR_DONTRECORD);
@@ -131,6 +137,9 @@ public void OnTossBuildingForceChanged(ConVar convar, const char[] oldValue, con
 }
 public void OnTossBuildingOOBChanged(ConVar convar, const char[] oldValue, const char[] newValue) {
 	_ParseTypesTo(g_iNoOOBTypes, newValue);
+}
+public void OnTossBuildingUprightChanged(ConVar convar, const char[] oldValue, const char[] newValue) {
+	g_flUprightForce = convar.FloatValue;
 }
 static void _ParseTypesTo(int& value, const char[] typesString) {
 	if (StrContains(typesString, "dispenser", false)>=0) {
@@ -284,12 +293,16 @@ public void ThrowBuilding(any buildref) {
 	fwd[2] += (g_flThrowForce/3.25);//bit more archy
 	Entity_GetAbsVelocity(owner, velocity);
 	AddVectors(velocity, fwd, velocity);
+	angles[0] = angles[2] = 0.0; //upright angle = 0.0 yaw 0.0
 	
 	int phys = CreateEntityByName("prop_physics_multiplayer");
 	if (phys == INVALID_ENT_REFERENCE) return;
 	
+	char targetName[24];
+	Format(targetName, sizeof(targetName), "physbuilding_%08X", EntIndexToEntRef(phys));
 	char buffer[PLATFORM_MAX_PATH];
 	GetModelForBuilding(type, buffer, sizeof(buffer));
+	DispatchKeyValue(phys, "targetname", targetName);
 	DispatchKeyValue(phys, "model", buffer);
 	DispatchKeyValue(phys, "physicsmode", "2"); //don't push (hard collide) with player (1), but get pushed (soft collide)
 	DispatchKeyValueVector(phys, "origin", origin);
@@ -308,6 +321,23 @@ public void ThrowBuilding(any buildref) {
 	ActivateEntity(phys);
 //	Entity_SetCollisionGroup(phys, COLLISION_GROUP_DEBRIS_TRIGGER);
 	SetEntityRenderMode(phys, RENDER_NORMAL); //why is it sometimes not rendered?
+	
+	int angleMgr = INVALID_ENT_REFERENCE;
+	if (g_flUprightForce > 0.01) {
+		angleMgr = CreateEntityByName("phys_keepupright");
+		if (angleMgr != INVALID_ENT_REFERENCE) {
+			DispatchKeyValue(angleMgr, "attach1", targetName);
+			DispatchKeyValueFloat(angleMgr, "angularlimit", g_flUprightForce);
+			DispatchKeyValueVector(angleMgr, "angles", angles);
+			if (!DispatchSpawn(angleMgr))
+				//oops; edict should go away on it's own
+				angleMgr = INVALID_ENT_REFERENCE;
+			else {
+				ActivateEntity(angleMgr);
+				AcceptEntityInput(angleMgr, "TurnOn");
+			}
+		}
+	}
 	
 	//set properties to prevent the building from progressing construction
 	bool newlyBuilt = GetEntProp(building, Prop_Send, "m_bCarryDeploy")==0;
@@ -329,6 +359,7 @@ public void ThrowBuilding(any buildref) {
 	AirbornData onade;
 	onade.physObject=EntIndexToEntRef(phys);
 	onade.building=EntIndexToEntRef(building);
+	onade.upright= (angleMgr != INVALID_ENT_REFERENCE) ? EntIndexToEntRef(angleMgr) : INVALID_ENT_REFERENCE;
 	onade.yaw=angles[1];
 	onade.newBuild=newlyBuilt;
 	onade.prevPos=origin;
@@ -349,14 +380,17 @@ void ValidateThrown() {
 		g_aAirbornObjects.GetArray(i,data);
 		int phys = EntRefToEntIndex(data.physObject);
 		int obj = EntRefToEntIndex(data.building);
+		int angMgr = (data.upright != INVALID_ENT_REFERENCE) ? EntRefToEntIndex(data.upright) : INVALID_ENT_REFERENCE;
 		//if at least one of the entities went away, something went wrong
 		// -> remove and continue
 		if (!IsValidEdict(phys)) {
+			if (IsValidEdict(angMgr)) AcceptEntityInput(angMgr, "Kill");
 			if (IsValidEdict(obj)) BreakBuilding(obj);
 			g_aAirbornObjects.Erase(i);
 			PrintToServer("Phys entity invalid");
 			continue;
 		} else if (!IsValidEdict(obj)) {
+			if (IsValidEdict(angMgr)) AcceptEntityInput(angMgr, "Kill");
 			if (IsValidEdict(phys)) AcceptEntityInput(phys, "Kill");
 			g_aAirbornObjects.Erase(i);
 			PrintToServer("Building entity invalid");
@@ -378,6 +412,7 @@ void ValidateThrown() {
 			TR_TraceRayFilter(data.prevPos, pos, CONTENTS_PLAYERCLIP, RayType_EndPoint, TEF_HitThrownFilter, i);
 			if (TR_DidHit()) {
 				BreakBuilding(obj);
+				if (IsValidEdict(angMgr)) AcceptEntityInput(angMgr, "Kill");
 				AcceptEntityInput(phys, "Kill");
 				g_aAirbornObjects.Erase(i);
 				continue;
@@ -443,6 +478,7 @@ void ValidateThrown() {
 		//check valid
 		CreateTimer(0.1, ValidateBuilding, EntIndexToEntRef(obj), TIMER_FLAG_NO_MAPCHANGE);
 		//we no longer need the "carrier"
+		if (IsValidEdict(angMgr)) AcceptEntityInput(angMgr, "Kill");
 		AcceptEntityInput(phys, "Kill");
 		g_aAirbornObjects.Erase(i);
 	}

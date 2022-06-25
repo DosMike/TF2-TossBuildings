@@ -15,6 +15,8 @@ Credits to zen for the idea :)
 ## ConVars
 * sm_toss_building_types "dispenser teleporter sentrygun" - Space separated building types that can be tossed. Remove a word to block that building from being tossed.
 * sm_toss_building_force 520 - The force with with to yeet the buildings. 520 felt good, 320 still works, idk keep it default i guess.
+* sm_toss_building_upright 0 - How much to pull the prop upright in degree/sec. Will somethwat prevent the prop twriling, 0 to disable.
+* sm_toss_building_breakoob "dispenser teleporter sentrygun" - Space separated list of building names that break out of bounds: Dispenser Teleporter Sentrygun.
 * sm_toss_building_version - Version convar for version
 
 ConVars go into `cfg/sourcemod/plugin.tossbuildings.cfg`.
