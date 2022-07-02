@@ -12,7 +12,7 @@
 #pragma newdecls required
 #pragma semicolon 1
 
-#define PLUGIN_VERSION "22w25b"
+#define PLUGIN_VERSION "22w26a"
 
 public Plugin myinfo = {
 	name = "[TF2] Toss Buildings",
@@ -59,7 +59,7 @@ int g_iBlockFlags;
 #define TBFLAG_DISPENSER (1<<BUILDING_DISPENSER)
 #define TBFLAG_TELEPORTER (1<<BUILDING_TELEPORTER)
 #define TBFLAG_SENTRYGUN (1<<BUILDING_SENTRYGUN)
-int g_iBlockTypes;
+int g_iAllowTypes;
 int g_iNoOOBTypes;
 float g_flThrowForce;
 float g_flUprightForce;
@@ -130,7 +130,7 @@ public void LockConVar(ConVar convar, const char[] oldValue, const char[] newVal
 	if (!StrEqual(newValue, PLUGIN_VERSION)) convar.SetString(PLUGIN_VERSION);
 }
 public void OnTossBuildingTypesChanged(ConVar convar, const char[] oldValue, const char[] newValue) {
-	_ParseTypesTo(g_iBlockTypes, newValue);
+	_ParseTypesTo(g_iAllowTypes, newValue);
 }
 public void OnTossBuildingForceChanged(ConVar convar, const char[] oldValue, const char[] newValue) {
 	g_flThrowForce = convar.FloatValue;
@@ -143,19 +143,19 @@ public void OnTossBuildingUprightChanged(ConVar convar, const char[] oldValue, c
 }
 static void _ParseTypesTo(int& value, const char[] typesString) {
 	if (StrContains(typesString, "dispenser", false)>=0) {
-		value &=~ TBFLAG_DISPENSER;
-	} else {
 		value |= TBFLAG_DISPENSER;
+	} else {
+		value &=~ TBFLAG_DISPENSER;
 	}
 	if (StrContains(typesString, "teleporter", false)>=0) {
-		value &=~ TBFLAG_TELEPORTER;
-	} else {
 		value |= TBFLAG_TELEPORTER;
+	} else {
+		value &=~ TBFLAG_TELEPORTER;
 	}
 	if (StrContains(typesString, "sentry", false)>=0) {
-		value &=~ TBFLAG_SENTRYGUN;
-	} else {
 		value |= TBFLAG_SENTRYGUN;
+	} else {
+		value &=~ TBFLAG_SENTRYGUN;
 	}
 }
 
@@ -209,7 +209,7 @@ public void OnPlayerCarryObject(Event event, const char[] name, bool dontBroadca
 	int owner = GetClientOfUserId(event.GetInt("userid"));
 	int objecttype = event.GetInt("object");
 	int building = event.GetInt("index");
-	if ((BUILDING_DISPENSER <= objecttype <= BUILDING_SENTRYGUN) && IsClientInGame(owner) && IsValidEdict(building) && ( g_iBlockTypes&(1<<objecttype) )==0) {
+	if ((BUILDING_DISPENSER <= objecttype <= BUILDING_SENTRYGUN) && IsClientInGame(owner) && IsValidEdict(building) && ( g_iAllowTypes&(1<<objecttype) )!=0) {
 		//small sanity check: was this building picked up while flagged as thrown?
 		if (g_aAirbornObjects.FindValue(EntIndexToEntRef(building), AirbornData::building) != -1) {
 			//visually destory the building, the check timer will clean up the phys prop later
@@ -504,7 +504,7 @@ bool IsThrowBlocked(int client) {
 	if (!(BUILDING_DISPENSER <= type <= BUILDING_SENTRYGUN))
 		return false; //supported buildings, not always correct on weapon_builder
 	
-	return ( g_iBlockTypes&(1<<type) )!=0;
+	return ( g_iAllowTypes&(1<<type) )==0;
 }
 
 bool CheckThrowPos(int client) {
