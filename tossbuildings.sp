@@ -12,7 +12,7 @@
 #pragma newdecls required
 #pragma semicolon 1
 
-#define PLUGIN_VERSION "22w26a"
+#define PLUGIN_VERSION "22w26b"
 
 public Plugin myinfo = {
 	name = "[TF2] Toss Buildings",
@@ -399,7 +399,7 @@ void ValidateThrown() {
 		int type = GetEntProp(obj, Prop_Send, "m_iObjectType");
 		
 		float mins[3],maxs[3],pos[3],vec[3];
-		//get a "disc" for collision
+		//get bounds for collision
 		Entity_GetMinSize(obj,mins);
 		Entity_GetMaxSize(obj,maxs);
 		//find local center point, as mins/maxs is for the AABB
@@ -602,8 +602,8 @@ public bool TEE_SearchFuncNobuild(int entity, any data) {
 	char classname[32];
 	if (entity == data) return true;
 	GetEntityClassname(entity, classname, sizeof(classname));
-	PrintToServer("Found %s (%i)", classname, entity);
-	if (StrEqual(classname, "func_nobuild")) {
+	// TF2Util_IsPointInRespawnRoom is only checking for same team spawn room - daheck?
+	if (StrEqual(classname, "func_nobuild") || StrEqual(classname, "func_respawnroom")) {
 		bTEEFuncNobuildFound = true;
 		return false;
 	}
