@@ -8,11 +8,18 @@
 #include <tf2utils>
 
 #tryinclude <tf2hudmsg>
+#if !defined _inc_tf2hudmsg
+#warning Compiling without TF2hudmsg
+#endif
+#tryinclude <tf_custom_attributes>
+#if !defined __tf_custom_attributes_included
+#warning Compiling without TF Custom Attributes
+#endif
 
 #pragma newdecls required
 #pragma semicolon 1
 
-#define PLUGIN_VERSION "22w26b"
+#define PLUGIN_VERSION "22w44a"
 
 public Plugin myinfo = {
 	name = "[TF2] Toss Buildings",
@@ -64,10 +71,12 @@ int g_iNoOOBTypes;
 float g_flThrowForce;
 float g_flUprightForce;
 int g_iBuildingModelIndexLV1[3];
+bool g_bAllowStacking;
 
 GlobalForward g_fwdToss, g_fwdTossPost, g_fwdLanded;
 
 bool g_bDepHudMsg; //for fancy messages
+bool g_bDepCustomAttribs; //for custom attributes / custom weapons integration
 
 public void OnPluginStart() {
 	GameData data = new GameData("tbobj.games");
@@ -91,10 +100,12 @@ public void OnPluginStart() {
 	ConVar cvarForce = CreateConVar("sm_toss_building_force", "520", "Base force to use when throwing buildings", _, true, 100.0, true, 10000.0);
 	ConVar cvarUpright = CreateConVar("sm_toss_building_upright", "0", "How much to pull the prop upright in degree/sec. Will somethwat prevent the prop twriling, 0 to disable", _, true, 0.0, true, 3600.0);
 	ConVar cvarOOB = CreateConVar("sm_toss_building_breakoob", "dispenser teleporter sentrygun", "Space separated list of building names that break out of bounds: Dispenser Teleporter Sentrygun");
+	ConVar cvarStack = CreateConVar("sm_toss_building_allowstacking", "0", "Set to 1 to allow tossing builings on top of each other", _, true, 0.0, true, 1.0);
 	cvarTypes.AddChangeHook(OnTossBuildingTypesChanged);
 	cvarForce.AddChangeHook(OnTossBuildingForceChanged);
 	cvarUpright.AddChangeHook(OnTossBuildingUprightChanged);
 	cvarOOB.AddChangeHook(OnTossBuildingOOBChanged);
+	cvarStack.AddChangeHook(OnTossBuildingStackingChanged);
 	//always load values on startup
 	char buffer[128];
 	cvarTypes.GetString(buffer, sizeof(buffer));
@@ -103,12 +114,14 @@ public void OnPluginStart() {
 	OnTossBuildingUprightChanged(cvarUpright, NULL_STRING, NULL_STRING);//doesn't use passed string
 	cvarOOB.GetString(buffer, sizeof(buffer));
 	OnTossBuildingOOBChanged(cvarOOB, buffer, buffer);
+	OnTossBuildingStackingChanged(cvarStack, NULL_STRING, NULL_STRING);//doesn't use passed string
 	//load actual values from config
 	AutoExecConfig();
 	delete cvarTypes;
 	delete cvarForce;
 	delete cvarUpright;
 	delete cvarOOB;
+	delete cvarStack;
 	
 	ConVar cvarVersion = CreateConVar("sm_toss_building_version", PLUGIN_VERSION, "", FCVAR_NOTIFY|FCVAR_DONTRECORD);
 	cvarVersion.AddChangeHook(LockConVar);
@@ -140,6 +153,9 @@ public void OnTossBuildingOOBChanged(ConVar convar, const char[] oldValue, const
 }
 public void OnTossBuildingUprightChanged(ConVar convar, const char[] oldValue, const char[] newValue) {
 	g_flUprightForce = convar.FloatValue;
+}
+public void OnTossBuildingStackingChanged(ConVar convar, const char[] oldValue, const char[] newValue) {
+	g_bAllowStacking = convar.BoolValue;
 }
 static void _ParseTypesTo(int& value, const char[] typesString) {
 	if (StrContains(typesString, "dispenser", false)>=0) {
@@ -179,12 +195,15 @@ public void OnClientDisconnect(int client) {
 
 public void OnAllPluginsLoaded() {
 	g_bDepHudMsg = LibraryExists("tf2hudmsg");
+	g_bDepCustomAttribs = LibraryExists("tf2custattr");
 }
 public void OnLibraryAdded(const char[] name) {
 	if (StrEqual(name, "tf2hudmsg")) g_bDepHudMsg = true;
+	else if (StrEqual(name, "tf2custattr")) g_bDepCustomAttribs = true;
 }
 public void OnLibraryRemoved(const char[] name) {
 	if (StrEqual(name, "tf2hudmsg")) g_bDepHudMsg = false;
+	else if (StrEqual(name, "tf2custattr")) g_bDepCustomAttribs = false;
 }
 
 public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3], float angles[3], int &weapon, int &subtype, int &cmdnum, int &tickcount, int &seed, int mouse[2]) {
@@ -294,6 +313,13 @@ public void ThrowBuilding(any buildref) {
 	Entity_GetAbsVelocity(owner, velocity);
 	AddVectors(velocity, fwd, velocity);
 	angles[0] = angles[2] = 0.0; //upright angle = 0.0 yaw 0.0
+	
+	//double up the CheckThrowPos trace, since we're note a net event and a tick later
+	TR_TraceRayFilter(eyes, origin, MASK_PLAYERSOLID, RayType_EndPoint, TEF_HitSelfFilterPassClients, owner);
+	if (TR_DidHit()) {
+		Beep(owner);
+		return;
+	}
 	
 	int phys = CreateEntityByName("prop_physics_multiplayer");
 	if (phys == INVALID_ENT_REFERENCE) return;
@@ -445,6 +471,23 @@ void ValidateThrown() {
 		}
 		TR_GetEndPosition(pos);
 		TR_GetPlaneNormal(INVALID_HANDLE, vec); //vanilla is not snapping to this
+		//check if we are placed on top of another building
+		if (!g_bAllowStacking) {
+			int landedOn = TR_GetEntityIndex();
+			if (landedOn > 0 && IsValidEdict(landedOn) && HasEntProp(landedOn, Prop_Send, "m_iObjectType")) {
+				//validate the classname prefix. they all start with obj_, so no need to read more chars
+				char classname[5];
+				GetEntityClassname(landedOn, classname, sizeof(classname));
+				if (StrEqual(classname, "obj_")) {
+					//we actually landed on another building, die please
+					BreakBuilding(obj);
+					if (IsValidEdict(angMgr)) AcceptEntityInput(angMgr, "Kill");
+					AcceptEntityInput(phys, "Kill");
+					g_aAirbornObjects.Erase(i);
+					continue;
+				}
+			}
+		}
 		
 		//check surface slope
 		float up[3]; up[2]=1.0;
@@ -498,11 +541,18 @@ bool IsThrowBlocked(int client) {
 	int objectToBuild = GetEntPropEnt(weapon, Prop_Send, "m_hObjectBeingBuilt");
 	if (objectToBuild == INVALID_ENT_REFERENCE) {
 		RequestFrame(FixNoObjectBeingHeld, GetClientUserId(client));
-		return false; //no object being buil!?
+		return false; //no object being built!?
 	}
 	int type = GetEntProp(objectToBuild, Prop_Send, "m_iObjectType");
 	if (!(BUILDING_DISPENSER <= type <= BUILDING_SENTRYGUN))
 		return false; //supported buildings, not always correct on weapon_builder
+
+#if defined __tf_custom_attributes_included
+	if (g_bDepCustomAttribs) {
+		int cwAllowed = TF2CustAttr_GetInt(weapon, "toss buildings");
+		if ((cwAllowed & (1<<type)) != 0) return false; // allowed by custattr superseeds config
+	}
+#endif
 	
 	return ( g_iAllowTypes&(1<<type) )==0;
 }
@@ -522,9 +572,8 @@ bool CheckThrowPos(int client) {
 	ScaleVector(fwd, 64.0);
 	AddVectors(origin, fwd, origin);
 	//ensure we see the target
-	Handle trace = TR_TraceRayFilterEx(eyes, origin, MASK_PLAYERSOLID, RayType_EndPoint, TEF_HitSelfFilterPassClients, client);
-	bool hit = TR_DidHit(trace);
-	delete trace;
+	TR_TraceRayFilter(eyes, origin, MASK_PLAYERSOLID, RayType_EndPoint, TEF_HitSelfFilterPassClients, client);
+	bool hit = TR_DidHit();
 	//can't see throw point (prevent through walls)? make noise
 	if (hit) Beep(client);
 	return !hit;

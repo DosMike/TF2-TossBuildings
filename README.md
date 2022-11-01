@@ -17,9 +17,17 @@ Credits to zen for the idea :)
 * sm_toss_building_force 520 - The force with with to yeet the buildings. 520 felt good, 320 still works, idk keep it default i guess.
 * sm_toss_building_upright 0 - How much to pull the prop upright in degree/sec. Will somethwat prevent the prop twriling, 0 to disable.
 * sm_toss_building_breakoob "dispenser teleporter sentrygun" - Space separated list of building names that break out of bounds: Dispenser Teleporter Sentrygun.
+* sm_toss_building_allowstacking 0 - Set to 1 to allow tossing buildings on top of each other.
 * sm_toss_building_version - Version convar for version
 
 ConVars go into `cfg/sourcemod/plugin.tossbuildings.cfg`.
+
+## Custom Attribute
+This plugin also works as [custom attributes](https://github.com/nosoop/SM-TFCustAttr) plugin.
+Add the "`toss buildings`" attribute to the building tool (base item def index `28`) with the following values (add up to combine)
+* 1 : Dispenser
+* 2 : Teleporter
+* 4 : Sentries
 
 ## Library
 Other plugins can listen to buildings being tossed and landing. For more info check the include.
