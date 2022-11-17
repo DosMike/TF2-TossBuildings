@@ -7,6 +7,7 @@
 #include <vphysics>
 #include <tf2utils>
 
+#undef REQUIRE_PLUGIN
 #tryinclude <tf2hudmsg>
 #if !defined _inc_tf2hudmsg
 #warning Compiling without TF2hudmsg
@@ -15,11 +16,12 @@
 #if !defined __tf_custom_attributes_included
 #warning Compiling without TF Custom Attributes
 #endif
+#define REQUIRE_PLUGIN
 
 #pragma newdecls required
 #pragma semicolon 1
 
-#define PLUGIN_VERSION "22w44a"
+#define PLUGIN_VERSION "22w46a"
 
 public Plugin myinfo = {
 	name = "[TF2] Toss Buildings",
@@ -258,6 +260,7 @@ public void TF2_OnWaitingForPlayersEnd() {
 
 public Action Timer_PlaceBuildings(Handle timer) {
 	ValidateThrown();
+	return Plugin_Continue;
 }
 
 public bool TEF_HitSelfFilter(int entity, int contentsMask, any data) {

@@ -10,6 +10,7 @@ Credits to zen for the idea :)
 * VPhysics Extension - because it's the best way to accelerate physics props
 * TF2Utils - because that can check if things are in spawn rooms
 * tf2hudmsg - because HudNotifications are prettier than PrintHintText (*OPTIONAL*)
+* tf_custom_attributes - get crazy with custom weapons (*OPTIONAL*)
 * SMLib Transitional-Syntax - because it makes things easier for me (*COMPILE ONLY*)
 
 ## ConVars
