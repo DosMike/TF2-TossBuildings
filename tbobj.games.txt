@@ -2,7 +2,7 @@
 	"tf" {
 		"Signatures" {
 			// one of two methods with: "robo_sapper", starts with member lookup, first non-virtual call returns ~vtable fun 30
-			"StartBuilding" {
+			"CTFWeaponBuilder::StartBuilding()" {
 				"library"	"server"
 				"linux"	"@_ZN16CTFWeaponBuilder13StartBuildingEv"
 				"windows" "\x55\x8B\xEC\x51\x8B\xD1\x53\x89"
@@ -10,11 +10,5 @@
 				//MASK  ff ff ff ff ff ff ff ff 00 00
 			}
 		}
-		//"Offsets" {
-		//	"IsPlacementPosValid" {
-		//		"linux" "335"
-		//		"windows" "334"
-		//	}
-		//}
 	}
 }

@@ -9,19 +9,23 @@
 
 #undef REQUIRE_PLUGIN
 #tryinclude <tf2hudmsg>
-#if !defined _inc_tf2hudmsg
-#warning Compiling without TF2hudmsg
-#endif
+ #if !defined _inc_tf2hudmsg
+  #warning Compiling without TF2hudmsg
+ #endif
 #tryinclude <tf_custom_attributes>
-#if !defined __tf_custom_attributes_included
-#warning Compiling without TF Custom Attributes
-#endif
+ #if !defined __tf_custom_attributes_included
+  #warning Compiling without TF Custom Attributes
+ #endif
+#tryinclude <tf2attributes>
+ #if !defined _tf2attributes_included
+  #warning Compiling without TF2Attributes
+ #endif
 #define REQUIRE_PLUGIN
 
 #pragma newdecls required
 #pragma semicolon 1
 
-#define PLUGIN_VERSION "22w46a"
+#define PLUGIN_VERSION "22w47a"
 
 public Plugin myinfo = {
 	name = "[TF2] Toss Buildings",
@@ -58,7 +62,6 @@ enum struct AirbornData {
 
 bool g_bPlayerThrow[MAXPLAYERS+1];
 Handle sdk_fnStartBuilding;
-//Handle sdk_fnIsPlacementPosValid;
 ArrayList g_aAirbornObjects;
 float g_flClientLastBeep[MAXPLAYERS+1];
 float g_flClientLastNotif[MAXPLAYERS+1]; //for hud notifs, as those make noise
@@ -78,6 +81,7 @@ bool g_bAllowStacking;
 GlobalForward g_fwdToss, g_fwdTossPost, g_fwdLanded;
 
 bool g_bDepHudMsg; //for fancy messages
+bool g_bDepAttribHooks; //for hidden dev attributes, works better than custom attributes
 bool g_bDepCustomAttribs; //for custom attributes / custom weapons integration
 
 public void OnPluginStart() {
@@ -86,15 +90,9 @@ public void OnPluginStart() {
 		SetFailState("Could not load gamedata: File is missing");
 	
 	StartPrepSDKCall(SDKCall_Entity); //weapon
-	PrepSDKCall_SetFromConf(data, SDKConf_Signature, "StartBuilding");
+	PrepSDKCall_SetFromConf(data, SDKConf_Signature, "CTFWeaponBuilder::StartBuilding()");
 	if ((sdk_fnStartBuilding = EndPrepSDKCall())==null)
-		SetFailState("Could not load gamedata: StartBuilding Signature missing or outdated");
-	
-//	StartPrepSDKCall(SDKCall_Entity); //building
-//	PrepSDKCall_SetFromConf(data, SDKConf_Virtual, "IsPlacementPosValid");
-//	PrepSDKCall_SetReturnInfo(SDKType_PlainOldData, SDKPass_Plain);
-//	if ((sdk_fnIsPlacementPosValid = EndPrepSDKCall())==null)
-//		SetFailState("Could not load gamedata: IsPlacementPosValid Offset missing or outdated");
+		SetFailState("Could not load gamedata: CTFWeaponBuilder::StartBuilding() Signature missing or outdated");
 	
 	delete data;
 	
@@ -198,14 +196,17 @@ public void OnClientDisconnect(int client) {
 public void OnAllPluginsLoaded() {
 	g_bDepHudMsg = LibraryExists("tf2hudmsg");
 	g_bDepCustomAttribs = LibraryExists("tf2custattr");
+	g_bDepAttribHooks = LibraryExists("tf2attributes");
 }
 public void OnLibraryAdded(const char[] name) {
 	if (StrEqual(name, "tf2hudmsg")) g_bDepHudMsg = true;
 	else if (StrEqual(name, "tf2custattr")) g_bDepCustomAttribs = true;
+	else if (StrEqual(name, "tf2attributes")) g_bDepAttribHooks = true;
 }
 public void OnLibraryRemoved(const char[] name) {
 	if (StrEqual(name, "tf2hudmsg")) g_bDepHudMsg = false;
 	else if (StrEqual(name, "tf2custattr")) g_bDepCustomAttribs = false;
+	else if (StrEqual(name, "tf2attributes")) g_bDepAttribHooks = false;
 }
 
 public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3], float angles[3], int &weapon, int &subtype, int &cmdnum, int &tickcount, int &seed, int mouse[2]) {
@@ -317,10 +318,11 @@ public void ThrowBuilding(any buildref) {
 	AddVectors(velocity, fwd, velocity);
 	angles[0] = angles[2] = 0.0; //upright angle = 0.0 yaw 0.0
 	
-	//double up the CheckThrowPos trace, since we're note a net event and a tick later
+	//double up the CheckThrowPos trace, since we're a tick later
 	TR_TraceRayFilter(eyes, origin, MASK_PLAYERSOLID, RayType_EndPoint, TEF_HitSelfFilterPassClients, owner);
 	if (TR_DidHit()) {
-		Beep(owner);
+		// the building is already going up, we need to either handle the refund or break the building
+		BreakBuilding(building);
 		return;
 	}
 	
@@ -550,15 +552,35 @@ bool IsThrowBlocked(int client) {
 	if (!(BUILDING_DISPENSER <= type <= BUILDING_SENTRYGUN))
 		return false; //supported buildings, not always correct on weapon_builder
 
+#if defined _tf2attributes_included
+	if (g_bDepAttribHooks) {
+		int cwAllowed = TF2Attrib_HookValueInt(0, "toss buildings", client);
+		if ((cwAllowed & (1<<type)) != 0) return false; // allowed by attributes superseeds config
+	}
+#endif
 #if defined __tf_custom_attributes_included
 	if (g_bDepCustomAttribs) {
-		int cwAllowed = TF2CustAttr_GetInt(weapon, "toss buildings");
+		int cwAllowed = CA_HookValueIntOR(weapon, "toss buildings");
 		if ((cwAllowed & (1<<type)) != 0) return false; // allowed by custattr superseeds config
 	}
 #endif
 	
 	return ( g_iAllowTypes&(1<<type) )==0;
 }
+
+#if defined __tf_custom_attributes_included
+//Custom Attributes Framework has no automatic combination like the games HookValue functions.
+//So this function will go through the weapons equipped and combine the values for each onto
+//the players value to get the complete bit mask.
+int CA_HookValueIntOR(int client, const char[] name) {
+	int value = TF2CustAttr_GetInt(client, name);
+	for (int slot=0; slot<6; slot+=1) {
+		int weapon = GetPlayerWeaponSlot(client, slot);
+		if (IsValidEdict(weapon)) value |= TF2CustAttr_GetInt(weapon, name);
+	}
+	return value;
+}
+#endif
 
 bool CheckThrowPos(int client) {
 	if (g_iBlockFlags != 0) return false;
@@ -633,19 +655,6 @@ void FixNoObjectBeingHeld(int user) {
 		}
 	}
 }
-
-//crashes, idk why
-//bool IsPlacementPosValid(int building) {
-//	char classname[64];
-//	if (!IsValidEdict(building)
-//	|| !GetEntityClassname(building, classname, sizeof(classname))
-//	|| !(StrEqual(classname, "obj_sentrygun")
-//	   || StrEqual(classname, "obj_teleporter")
-//	   || StrEqual(classname, "obj_dispenser")
-//	   ))
-//		ThrowError("Entity is not a building");
-//	return SDKCall(sdk_fnIsPlacementPosValid, building);
-//}
 
 //wow, searching a type of entity at a certain location sure sucks
 static bool bTEEFuncNobuildFound;

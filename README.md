@@ -24,8 +24,21 @@ Credits to zen for the idea :)
 ConVars go into `cfg/sourcemod/plugin.tossbuildings.cfg`.
 
 ## Custom Attribute
-This plugin also works as [custom attributes](https://github.com/nosoop/SM-TFCustAttr) plugin.
-Add the "`toss buildings`" attribute to the building tool (base item def index `28`) with the following values (add up to combine)
+This plugin also works as custom attribute. It is recommendedto use [Hidden dev attributes](https://forums.alliedmods.net/showthread.php?t=326853), but [custom attributes](https://github.com/nosoop/SM-TFCustAttr) is also supported.
+
+I'm not too familiar with hidden dev attributes, but the entry should probably look something like this (Don't forget to give it a unique id aka number somewhere above 4000):
+```c
+//Allows to throw buildings as engi
+"4269"
+{
+	"name"	"toss buildings"
+	"attribute_class"	"toss buildings"
+	"description_format"	"value_is_additive"
+	"stored_as_integer"	"1"
+}
+```
+
+Add the "`toss buildings`" attribute with the following values (add up to combine):
 * 1 : Dispenser
 * 2 : Teleporter
 * 4 : Sentries
