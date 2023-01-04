@@ -25,7 +25,7 @@
 #pragma newdecls required
 #pragma semicolon 1
 
-#define PLUGIN_VERSION "22w47a"
+#define PLUGIN_VERSION "23w01a"
 
 public Plugin myinfo = {
 	name = "[TF2] Toss Buildings",
@@ -83,6 +83,11 @@ GlobalForward g_fwdToss, g_fwdTossPost, g_fwdLanded;
 bool g_bDepHudMsg; //for fancy messages
 bool g_bDepAttribHooks; //for hidden dev attributes, works better than custom attributes
 bool g_bDepCustomAttribs; //for custom attributes / custom weapons integration
+
+public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max) {
+	FixOptionalDeps();
+	return APLRes_Success;
+}
 
 public void OnPluginStart() {
 	GameData data = new GameData("tbobj.games");
@@ -560,7 +565,7 @@ bool IsThrowBlocked(int client) {
 #endif
 #if defined __tf_custom_attributes_included
 	if (g_bDepCustomAttribs) {
-		int cwAllowed = CA_HookValueIntOR(weapon, "toss buildings");
+		int cwAllowed = CA_HookValueIntOR(client, "toss buildings");
 		if ((cwAllowed & (1<<type)) != 0) return false; // allowed by custattr superseeds config
 	}
 #endif
@@ -739,4 +744,16 @@ void GetModelForBuilding(int buildingType, char[] model, int maxlen) {
 		case BUILDING_TELEPORTER: strcopy(model, maxlen, "models/buildables/teleporter_light.mdl");
 		default: ThrowError("Unsupported Building Type %i", buildingType);
 	}
+}
+
+static void FixOptionalDeps() {
+	MarkNativeAsOptional("TF2CustAttr_OnKeyValuesAdded");
+	MarkNativeAsOptional("TF2CustAttr_GetAttributeKeyValues");
+	MarkNativeAsOptional("TF2CustAttr_UseKeyValues");
+	MarkNativeAsOptional("TF2CustAttr_GetInt");
+	MarkNativeAsOptional("TF2CustAttr_GetFloat");
+	MarkNativeAsOptional("TF2CustAttr_GetString");
+	MarkNativeAsOptional("TF2CustAttr_SetInt");
+	MarkNativeAsOptional("TF2CustAttr_SetFloat");
+	MarkNativeAsOptional("TF2CustAttr_SetString");
 }
