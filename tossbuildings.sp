@@ -703,7 +703,7 @@ public Action ValidateBuilding(Handle timer, any building) {
 	if (invalid) BreakBuilding(obj);
 	if (g_fwdLanded.FunctionCount>0) {
 		Call_StartForward(g_fwdLanded);
-		Call_PushCell(building);
+		Call_PushCell(obj);
 		Call_PushCell(!invalid);
 		Call_Finish();
 	}
