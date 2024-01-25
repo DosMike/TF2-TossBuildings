@@ -29,11 +29,12 @@ forward Action TF2_OnTossBuilding(int building, int objectType, int owner);
  * Player has just thrown a building
  * 
  * @param building - entity index of the building, doesn't change from the moment the building is SELECTED
+ * @param phys - entity index of the prop pretending to be a building to display the throw 
  * @param objectType - type of BUILDING_*
  * @param owner - the player currently trying to throw the building
  * @noreturn
  */
-forward void TF2_OnTossBuildingPost(int building, int objectType, int owner);
+forward void TF2_OnTossBuildingPost(int building, int phys, int objectType, int owner);
 
 /**
  * The building has landed. Not guaranteed to be called after a throw (class might change, etc).
