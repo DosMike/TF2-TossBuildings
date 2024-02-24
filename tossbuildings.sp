@@ -141,7 +141,7 @@ public void OnPluginStart() {
 	
 	//let other plugins integrate :)
 	g_fwdToss = CreateGlobalForward("TF2_OnTossBuilding", ET_Event, Param_Cell, Param_Cell, Param_Cell);
-	g_fwdTossPost = CreateGlobalForward("TF2_OnTossBuildingPost", ET_Ignore, Param_Cell, Param_Cell, Param_Cell);
+	g_fwdTossPost = CreateGlobalForward("TF2_OnTossBuildingPost", ET_Ignore, Param_Cell, Param_Cell, Param_Cell, Param_Cell);
 	g_fwdLanded = CreateGlobalForward("TF2_OnBuildingLanded", ET_Ignore, Param_Cell, Param_Cell);
 }
 public void LockConVar(ConVar convar, const char[] oldValue, const char[] newValue) {
@@ -402,8 +402,9 @@ public void ThrowBuilding(any buildref) {
 	g_aAirbornObjects.PushArray(onade);
 	
 	if (g_fwdTossPost.FunctionCount>0) {
-		Call_StartForward(g_fwdToss);
+		Call_StartForward(g_fwdTossPost);
 		Call_PushCell(building);
+		Call_PushCell(phys);
 		Call_PushCell(type);
 		Call_PushCell(owner);
 		Call_Finish();
@@ -703,7 +704,7 @@ public Action ValidateBuilding(Handle timer, any building) {
 	if (invalid) BreakBuilding(obj);
 	if (g_fwdLanded.FunctionCount>0) {
 		Call_StartForward(g_fwdLanded);
-		Call_PushCell(building);
+		Call_PushCell(obj);
 		Call_PushCell(!invalid);
 		Call_Finish();
 	}
