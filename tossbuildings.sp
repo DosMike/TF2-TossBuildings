@@ -25,7 +25,7 @@
 #pragma newdecls required
 #pragma semicolon 1
 
-#define PLUGIN_VERSION "23w01a"
+#define PLUGIN_VERSION "24w08a"
 
 public Plugin myinfo = {
 	name = "[TF2] Toss Buildings",
