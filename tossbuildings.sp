@@ -25,7 +25,7 @@
 #pragma newdecls required
 #pragma semicolon 1
 
-#define PLUGIN_VERSION "24w08a"
+#define PLUGIN_VERSION "24w50a"
 
 public Plugin myinfo = {
 	name = "[TF2] Toss Buildings",
@@ -55,12 +55,13 @@ enum struct AirbornData {
 	int physObject;
 	int building;
 	int upright;
+	int owner;
 	float yaw;
 	bool newBuild;
 	float prevPos[3];
 }
 
-bool g_bPlayerThrow[MAXPLAYERS+1];
+bool g_bPlayerThrow[MAXPLAYERS+1]; //whether the next build event should trigger a toss
 Handle sdk_fnStartBuilding;
 ArrayList g_aAirbornObjects;
 float g_flClientLastBeep[MAXPLAYERS+1];
@@ -136,6 +137,7 @@ public void OnPluginStart() {
 	HookEvent("player_carryobject", OnPlayerCarryObject);
 	HookEvent("player_builtobject", OnPlayerBuiltObject);
 	HookEvent("player_dropobject", OnPlayerBuiltObject);
+	AddCommandListener(OnPlayerPickObject, "build");
 	
 	g_aAirbornObjects = new ArrayList(sizeof(AirbornData)); //phys parent, object, thrown angle (yaw)
 	
@@ -217,12 +219,13 @@ public void OnLibraryRemoved(const char[] name) {
 public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3], float angles[3], int &weapon, int &subtype, int &cmdnum, int &tickcount, int &seed, int mouse[2]) {
 	if (!(1<=client<=MaxClients) || !IsClientInGame(client) || IsFakeClient(client)) return Plugin_Continue;
 	if ((buttons & IN_RELOAD)!=0 && !g_bPlayerThrow[client]) {
-		if ( IsThrowBlocked(client) ) {
+		int type = GetHeldObjectType(client);
+		if ( type != BUILDING_INVALID_OBJECT && !IsPlayerAllowedToThrow(client, type) ) {
 			if (GetClientTime(client) - g_flClientLastNotif[client] >= 1.0) {
 				g_flClientLastNotif[client] = GetClientTime(client);
 				HudNotify(client, 0, "You can't toss this building");
 			}
-		} else {
+		} else if (g_aAirbornObjects.FindValue(client, AirbornData::owner) == -1) {
 			//trigger force build and throw on Reload
 			g_bPlayerThrow[client] = true;
 			if (CheckThrowPos(client)) StartBuilding(client);
@@ -254,6 +257,21 @@ public void OnPlayerBuiltObject(Event event, const char[] name, bool dontBroadca
 	if ((BUILDING_DISPENSER <= objecttype <= BUILDING_SENTRYGUN) && IsClientInGame(owner) && IsValidEdict(building) && g_bPlayerThrow[owner]) {
 		g_bPlayerThrow[owner] = false;
 		RequestFrame(ThrowBuilding,EntIndexToEntRef(building));
+	}
+}
+Action OnPlayerPickObject(int client, const char[] command, int argc)
+{
+	if (IsClientInGame(client) && IsPlayerAlive(client) && TF2_GetPlayerClass(client) == TFClass_Engineer) {
+		RequestFrame(NotifyTossable, GetClientUserId(client));
+	}
+	return Plugin_Continue;
+}
+void NotifyTossable(int userId) {
+	int client = GetClientOfUserId(userId);
+	if (!client) return;
+	int type = GetHeldObjectType(client);
+	if (type != BUILDING_INVALID_OBJECT && IsPlayerAllowedToThrow(client, type)) {
+		HudNotify(client, _, "Press [RELOAD] to toss the building");
 	}
 }
 
@@ -393,12 +411,13 @@ public void ThrowBuilding(any buildref) {
 	Phys_ApplyForceCenter(phys, velocity);// works best
 	
 	AirbornData onade;
-	onade.physObject=EntIndexToEntRef(phys);
-	onade.building=EntIndexToEntRef(building);
-	onade.upright= (angleMgr != INVALID_ENT_REFERENCE) ? EntIndexToEntRef(angleMgr) : INVALID_ENT_REFERENCE;
-	onade.yaw=angles[1];
-	onade.newBuild=newlyBuilt;
-	onade.prevPos=origin;
+	onade.physObject = EntIndexToEntRef(phys);
+	onade.building = EntIndexToEntRef(building);
+	onade.upright = (angleMgr != INVALID_ENT_REFERENCE) ? EntIndexToEntRef(angleMgr) : INVALID_ENT_REFERENCE;
+	onade.owner = owner;
+	onade.yaw = angles[1];
+	onade.newBuild = newlyBuilt;
+	onade.prevPos = origin;
 	g_aAirbornObjects.PushArray(onade);
 	
 	if (g_fwdTossPost.FunctionCount>0) {
@@ -538,40 +557,47 @@ void ValidateThrown() {
 	}
 }
 
-/** Invalid preconditions PASS! as this is used for message printing only */
-bool IsThrowBlocked(int client) {
+int GetHeldObjectType(int client) {
 	if (!IsClientInGame(client) || !IsPlayerAlive(client))
-		return false;
+		return BUILDING_INVALID_OBJECT;
 	int weapon = Client_GetActiveWeapon(client);
 	int item = IsValidEdict(weapon) ? GetEntProp(weapon, Prop_Send, "m_iItemDefinitionIndex") : -1;
 	if (item != 28)
-		return false; //require builder
+		return BUILDING_INVALID_OBJECT; //require builder
 	int bstate = GetEntProp(weapon, Prop_Send, "m_iBuildState");
 	if (bstate != BS_PLACING && bstate != BS_PLACING_INVALID)
-		return false; //currently not placing
+		return BUILDING_INVALID_OBJECT; //currently not placing
 	int objectToBuild = GetEntPropEnt(weapon, Prop_Send, "m_hObjectBeingBuilt");
 	if (objectToBuild == INVALID_ENT_REFERENCE) {
 		RequestFrame(FixNoObjectBeingHeld, GetClientUserId(client));
-		return false; //no object being built!?
+		return BUILDING_INVALID_OBJECT; //no object being built!?
 	}
 	int type = GetEntProp(objectToBuild, Prop_Send, "m_iObjectType");
+	if (!(BUILDING_DISPENSER <= type <= BUILDING_SENTRYGUN))
+		return BUILDING_INVALID_OBJECT; //supported buildings, not always correct on weapon_builder
+
+	return type;
+}
+
+/** Check attributes and convars */
+bool IsPlayerAllowedToThrow(int client, int type) {
 	if (!(BUILDING_DISPENSER <= type <= BUILDING_SENTRYGUN))
 		return false; //supported buildings, not always correct on weapon_builder
 
 #if defined _tf2attributes_included
 	if (g_bDepAttribHooks) {
 		int cwAllowed = TF2Attrib_HookValueInt(0, "toss buildings", client);
-		if ((cwAllowed & (1<<type)) != 0) return false; // allowed by attributes superseeds config
+		if ((cwAllowed & (1<<type)) != 0) return true; // allowed by attributes superseeds config
 	}
 #endif
 #if defined __tf_custom_attributes_included
 	if (g_bDepCustomAttribs) {
 		int cwAllowed = CA_HookValueIntOR(client, "toss buildings");
-		if ((cwAllowed & (1<<type)) != 0) return false; // allowed by custattr superseeds config
+		if ((cwAllowed & (1<<type)) != 0) return true; // allowed by custattr superseeds config
 	}
 #endif
 	
-	return ( g_iAllowTypes&(1<<type) )==0;
+	return ( g_iAllowTypes&(1<<type) )!=0;
 }
 
 #if defined __tf_custom_attributes_included
@@ -611,24 +637,27 @@ bool CheckThrowPos(int client) {
 }
 
 int StartBuilding(int client) {
-	if (!IsClientInGame(client) || !IsPlayerAlive(client))
+	if (!IsClientInGame(client) || !IsPlayerAlive(client)) {
 		return -1;
+	}
 	int weapon = Client_GetActiveWeapon(client);
 	int item = IsValidEdict(weapon) ? GetEntProp(weapon, Prop_Send, "m_iItemDefinitionIndex") : -1;
-	if (item != 28)
+	if (item != 28) {
 		return -1; //require builder
+	}
 	int bstate = GetEntProp(weapon, Prop_Send, "m_iBuildState");
-	if (bstate != BS_PLACING && bstate != BS_PLACING_INVALID)
+	if (bstate != BS_PLACING && bstate != BS_PLACING_INVALID) {
 		return -1; //currently not placing
+	}
 	int objectToBuild = GetEntPropEnt(weapon, Prop_Send, "m_hObjectBeingBuilt");
 	if (objectToBuild == INVALID_ENT_REFERENCE) {
 		RequestFrame(FixNoObjectBeingHeld, GetClientUserId(client));
 		return -1; //no object being buil!?
 	}
 	int type = GetEntProp(objectToBuild, Prop_Send, "m_iObjectType");
-	if (!(BUILDING_DISPENSER <= type <= BUILDING_SENTRYGUN))
+	if (!(BUILDING_DISPENSER <= type <= BUILDING_SENTRYGUN)) {
 		return -1; //supported buildings, not always correct on weapon_builder
-	
+	}
 	SetEntPropEnt(weapon, Prop_Send, "m_hOwner", client);
 	SetEntProp(weapon, Prop_Send, "m_iBuildState", BS_PLACING); //if placing_invalid
 	SDKCall(sdk_fnStartBuilding, weapon);
